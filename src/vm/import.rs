@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-use crate::app::{ImportDiskAction, ImportSource, ImportableVm, WizardQemuConfig};
+use crate::wizard_types::{ImportDiskAction, ImportSource, ImportableVm, WizardQemuConfig};
 
 // =========================================================================
 // libvirt XML Parsing

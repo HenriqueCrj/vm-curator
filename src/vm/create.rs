@@ -21,7 +21,7 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", escaped)
 }
 
-use crate::app::{CreateWizardState, DiskAction, WizardQemuConfig};
+use crate::wizard_types::{CreateWizardState, DiskAction, WizardQemuConfig};
 use crate::commands::qemu_img;
 use crate::vm::qemu_config::{PortForward, PortProtocol};
 

@@ -18,6 +18,10 @@ exclude = [
     "target/",
 ]
 
+[lib]
+name = "vm_curator"
+path = "src/lib.rs"
+
 [dependencies]
 ratatui = "0.30.0"
 crossterm = "0.29.0"
