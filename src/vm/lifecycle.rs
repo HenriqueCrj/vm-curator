@@ -296,6 +296,67 @@ pub fn launch_vm_sync(vm: &DiscoveredVm, options: &LaunchOptions) -> Result<()> 
     }
 }
 
+/// Launch VM with QEMU D-Bus display for GUI embedding.
+/// Rewrites the launch script in memory to replace any existing -display flag
+/// with -display dbus (session bus). Returns the child process PID on success.
+pub fn launch_vm_dbus(vm: &DiscoveredVm) -> Result<u32> {
+    // Ensure QMP socket is present so pause/resume still work.
+    let _ = ensure_qmp_in_script(&vm.path);
+
+    let script_path = vm.path.join("launch.sh");
+    let content = std::fs::read_to_string(&script_path)
+        .context("Failed to read launch.sh")?;
+
+    let modified = replace_display_for_dbus(&content, "-display dbus");
+
+    let tmp = vm.path.join(".launch_dbus_tmp.sh");
+    std::fs::write(&tmp, &modified).context("Failed to write temp launch script")?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+
+    let child = Command::new("bash")
+        .arg(&tmp)
+        .current_dir(&vm.path)
+        .spawn()
+        .context("Failed to spawn QEMU")?;
+    let pid = child.id();
+
+    let t = tmp.to_owned();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(4));
+        let _ = std::fs::remove_file(t);
+    });
+
+    Ok(pid)
+}
+
+/// Replace every `-display <backend>` argument in a bash launch script with `replacement`.
+/// Scripts with multiple case branches each get their own replacement.
+/// Also strips SPICE-specific lines that are incompatible with dbus display.
+fn replace_display_for_dbus(content: &str, replacement: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        let is_display = t.starts_with("-display ") || t.contains(" -display ");
+        let is_spice = t.starts_with("-spice ")
+            || (t.starts_with("-device virtio-serial") && t.contains("spice"))
+            || (t.starts_with("-device virtserialport") && t.contains("com.redhat.spice"))
+            || t.starts_with("-chardev spice");
+        if is_display {
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            if line.trim_end().ends_with('\\') {
+                out.push(format!("{}{} \\", indent, replacement));
+            } else {
+                out.push(format!("{}{}", indent, replacement));
+            }
+        } else if !is_spice {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
 /// Reset a VM by recreating its disk from a backing file or template
 pub fn reset_vm(vm: &DiscoveredVm) -> Result<()> {
     // Find the primary disk
