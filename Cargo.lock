@@ -1812,6 +1812,7 @@ dependencies = [
  "dirs",
  "include_dir",
  "libudev",
+ "log",
  "nom 8.0.0",
  "once_cell",
  "quick-xml",

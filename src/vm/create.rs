@@ -1066,6 +1066,10 @@ fn build_qemu_command_with_os(
         args.push(arg.clone());
     }
 
+    // QMP monitor socket — enables pause/resume and live monitoring
+    args.push("-qmp".to_string());
+    args.push("unix:$VM_DIR/qemu.sock,server=on,wait=off".to_string());
+
     args.join(" \\\n        ")
 }
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use log::warn;
 use std::path::{Path, PathBuf};
 
 use super::launch_parser::parse_launch_script;
@@ -487,7 +488,8 @@ pub fn discover_vms(library_path: &Path) -> Result<Vec<DiscoveredVm>> {
 
         let config = match parse_launch_script(&launch_script, &script_content) {
             Ok(cfg) => cfg,
-            Err(_) => {
+            Err(e) => {
+                warn!("Failed to parse launch script {}: {}", launch_script.display(), e);
                 QemuConfig {
                     raw_script: script_content,
                     ..QemuConfig::default()

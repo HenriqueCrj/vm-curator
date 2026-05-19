@@ -409,6 +409,15 @@ pub fn rename_vm(vm: &DiscoveredVm, new_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Save (or clear) the notes for a VM, preserving display_name and os_profile.
+pub fn save_notes(vm: &DiscoveredVm, notes: Option<&str>) -> Result<()> {
+    let display_name = vm.display_name();
+    let os_profile = vm.os_profile.as_deref().or(Some(&vm.id));
+    crate::vm::create::write_vm_metadata(&vm.path, &display_name, os_profile, notes)
+        .context("Failed to write VM notes")?;
+    Ok(())
+}
+
 /// A running QEMU process with its PID, command line, and working directory.
 pub struct QemuProcess {
     pub pid: u32,
@@ -1026,6 +1035,218 @@ fn parse_pci_section(content: &str) -> Vec<String> {
     }
 
     args
+}
+
+pub fn save_pci_passthrough(
+    vm: &DiscoveredVm,
+    devices: &[crate::hardware::PciDevice],
+) -> Result<()> {
+    let content = std::fs::read_to_string(&vm.launch_script)
+        .context("Failed to read launch script")?;
+
+    // Strip existing section and $PCI_PASSTHROUGH_ARGS variable references
+    let mut cleaned = String::new();
+    let mut in_pci_section = false;
+    for line in content.lines() {
+        if line.trim() == PCI_MARKER_START {
+            in_pci_section = true;
+            continue;
+        }
+        if line.trim() == PCI_MARKER_END {
+            in_pci_section = false;
+            continue;
+        }
+        if !in_pci_section {
+            let cleaned_line = line
+                .replace(" $PCI_PASSTHROUGH_ARGS", "")
+                .replace("$PCI_PASSTHROUGH_ARGS ", "")
+                .replace("$PCI_PASSTHROUGH_ARGS", "");
+            cleaned.push_str(&cleaned_line);
+            cleaned.push('\n');
+        }
+    }
+    while cleaned.ends_with("\n\n") {
+        cleaned.pop();
+    }
+
+    if devices.is_empty() {
+        std::fs::write(&vm.launch_script, cleaned)
+            .context("Failed to write launch script")?;
+        return Ok(());
+    }
+
+    // Build the PCI passthrough section with VFIO bind/restore helpers
+    let args = crate::hardware::generate_passthrough_args(devices);
+    let mut section = String::new();
+    section.push_str(PCI_MARKER_START);
+    section.push('\n');
+    section.push_str("PCI_PASSTHROUGH_ARGS=\"");
+    section.push_str(&args.join(" "));
+    section.push_str("\"\n");
+    section.push_str("PCI_DEVICES=(");
+    for (i, dev) in devices.iter().enumerate() {
+        if i > 0 { section.push(' '); }
+        section.push_str(&format!("\"{}\"", dev.address));
+    }
+    section.push_str(")\n");
+    section.push_str("declare -A PCI_ORIG_DRIVERS\n\n");
+
+    section.push_str(r#"_pci_elevated() {
+    if [[ $EUID -eq 0 ]]; then sh -c "$1"
+    elif command -v pkexec >/dev/null 2>&1; then pkexec sh -c "$1"
+    elif command -v sudo >/dev/null 2>&1; then sudo sh -c "$1"
+    else echo "Error: root required to bind PCI devices"; return 1; fi
+}
+bind_vfio() {
+    local bind_cmds=""
+    for dev in "${PCI_DEVICES[@]}"; do
+        local dev_path="/sys/bus/pci/devices/$dev"
+        local driver_link="$dev_path/driver"
+        [[ ! -d "$dev_path" ]] && { echo "Warning: $dev not found"; continue; }
+        if [[ -L "$driver_link" ]]; then
+            local current; current=$(basename "$(readlink "$driver_link")")
+            PCI_ORIG_DRIVERS[$dev]="$current"
+            [[ "$current" == "vfio-pci" ]] && { echo "$dev already bound"; continue; }
+            bind_cmds+="echo '$dev' > '$driver_link/unbind' 2>/dev/null; sleep 0.1; "
+        fi
+        bind_cmds+="echo 'vfio-pci' > '$dev_path/driver_override'; "
+        bind_cmds+="echo '$dev' > /sys/bus/pci/drivers_probe; "
+    done
+    [[ -n "$bind_cmds" ]] && { echo "Binding PCI devices to vfio-pci..."; _pci_elevated "$bind_cmds" || return 1; }
+    sleep 0.5
+}
+restore_pci() {
+    local restore_cmds=""
+    for dev in "${PCI_DEVICES[@]}"; do
+        local dev_path="/sys/bus/pci/devices/$dev"
+        local orig="${PCI_ORIG_DRIVERS[$dev]:-}"
+        [[ -z "$orig" || "$orig" == "vfio-pci" ]] && continue
+        echo "Restoring $dev to $orig..."
+        restore_cmds+="echo '$dev' > '$dev_path/driver/unbind' 2>/dev/null; "
+        restore_cmds+="echo '' > '$dev_path/driver_override'; "
+        restore_cmds+="echo '$dev' > /sys/bus/pci/drivers_probe; "
+    done
+    if [[ -n "$restore_cmds" ]]; then
+        if [[ $EUID -eq 0 ]]; then sh -c "$restore_cmds"
+        elif sudo -n true 2>/dev/null; then sudo sh -c "$restore_cmds"
+        elif command -v pkexec >/dev/null 2>&1; then pkexec sh -c "$restore_cmds" 2>/dev/null
+        else echo "Warning: could not restore PCI devices (reboot to restore)"; fi
+    fi
+}
+if declare -f cleanup >/dev/null 2>&1; then
+    eval "$(declare -f cleanup | sed '1s/cleanup/_pci_pre_cleanup/')"
+    cleanup() { restore_pci; _pci_pre_cleanup; }
+else
+    trap 'restore_pci' EXIT
+fi
+bind_vfio || exit 1
+"#);
+
+    section.push_str(PCI_MARKER_END);
+    section.push('\n');
+
+    let new_content = insert_args_section(&cleaned, &section, "$PCI_PASSTHROUGH_ARGS");
+    std::fs::write(&vm.launch_script, new_content)
+        .context("Failed to write launch script")?;
+    Ok(())
+}
+
+// ── QMP (QEMU Machine Protocol) ─────────────────────────────────────────────
+
+const QMP_ARG: &str = "        -qmp unix:$VM_DIR/qemu.sock,server=on,wait=off";
+
+/// Patch an existing launch.sh to include a QMP socket if not already present.
+/// Idempotent — safe to call before every launch.
+pub fn ensure_qmp_in_script(vm_path: &Path) -> Result<()> {
+    let script_path = vm_path.join("launch.sh");
+    let content = std::fs::read_to_string(&script_path)
+        .context("Failed to read launch.sh for QMP patch")?;
+
+    if content.contains("qemu.sock") {
+        return Ok(());
+    }
+
+    // Generated scripts always end each QEMU invocation block with a line containing
+    // no trailing `\` followed immediately by `        ;;`. Walk line-by-line and insert
+    // the QMP arg (with a continuation `\`) before each closing `;;` that follows a
+    // non-continuation QEMU arg line.
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = String::with_capacity(content.len() + 256);
+    let mut in_qemu_block = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_end();
+
+        if trimmed.contains("qemu-system") {
+            in_qemu_block = true;
+        }
+
+        // Detect the last arg of a QEMU block: no trailing `\`, next non-empty line is `;;`
+        if in_qemu_block
+            && !trimmed.ends_with('\\')
+            && !trimmed.is_empty()
+            && lines.get(i + 1).map(|l| l.trim()) == Some(";;")
+        {
+            result.push_str(line);
+            result.push_str(" \\\n");
+            result.push_str(QMP_ARG);
+            result.push('\n');
+            in_qemu_block = false;
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    std::fs::write(&script_path, result).context("Failed to write patched launch.sh")?;
+    Ok(())
+}
+
+/// Send a raw QMP command to a running VM's monitor socket.
+fn qmp_send(vm_path: &Path, command: &str) -> Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let sock = vm_path.join("qemu.sock");
+    let stream = UnixStream::connect(&sock)
+        .with_context(|| format!("QMP socket not available: {}", sock.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = stream;
+
+    // Read server greeting
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    // Negotiate capabilities (required before any command)
+    writer.write_all(b"{\"execute\":\"qmp_capabilities\"}\n")?;
+    line.clear();
+    reader.read_line(&mut line)?;
+
+    // Send the actual command
+    writer.write_all(format!("{{\"execute\":\"{}\"}}\n", command).as_bytes())?;
+    line.clear();
+    reader.read_line(&mut line)?;
+    Ok(line)
+}
+
+/// Pause a running VM (suspends guest execution, state preserved in memory).
+pub fn pause_vm(vm_path: &Path) -> Result<()> {
+    qmp_send(vm_path, "stop").map(|_| ())
+}
+
+/// Resume a paused VM.
+pub fn resume_vm(vm_path: &Path) -> Result<()> {
+    qmp_send(vm_path, "cont").map(|_| ())
+}
+
+/// Returns true if the VM is currently paused (QMP `query-status` → `"paused"`).
+/// Returns false if not running, not reachable, or in any other state.
+pub fn is_vm_paused(vm_path: &Path) -> bool {
+    qmp_send(vm_path, "query-status")
+        .map(|resp| resp.contains("\"paused\""))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
