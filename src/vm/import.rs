@@ -4,11 +4,12 @@
 //! and executes the import (directory creation, disk handling, launch script generation).
 
 use anyhow::{bail, Context, Result};
+use log::warn;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-use crate::app::{ImportDiskAction, ImportSource, ImportableVm, WizardQemuConfig};
+use crate::wizard_types::{ImportDiskAction, ImportSource, ImportableVm, WizardQemuConfig};
 
 // =========================================================================
 // libvirt XML Parsing
@@ -599,8 +600,9 @@ pub fn discover_libvirt_vms() -> Vec<ImportableVm> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("xml") {
-                    if let Ok(vm) = parse_libvirt_xml(&path) {
-                        vms.push(vm);
+                    match parse_libvirt_xml(&path) {
+                        Ok(vm) => vms.push(vm),
+                        Err(e) => warn!("Failed to parse libvirt XML {}: {}", path.display(), e),
                     }
                 }
             }
@@ -624,8 +626,9 @@ pub fn discover_quickemu_vms() -> Vec<ImportableVm> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("conf") {
-                    if let Ok(vm) = parse_quickemu_conf(&path) {
-                        vms.push(vm);
+                    match parse_quickemu_conf(&path) {
+                        Ok(vm) => vms.push(vm),
+                        Err(e) => warn!("Failed to parse quickemu conf {}: {}", path.display(), e),
                     }
                 }
             }
@@ -654,6 +657,23 @@ fn get_quickemu_search_dirs() -> Vec<PathBuf> {
         dirs.push(home.join("VMs"));
     }
     dirs
+}
+
+/// Scan any directory for importable VMs (libvirt .xml and quickemu .conf files).
+#[allow(dead_code)]
+pub fn discover_vms_in_dir(dir: &Path) -> Vec<ImportableVm> {
+    let mut vms = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else { return vms };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            match parse_config_file(&path) {
+                Ok(vm) => vms.push(vm),
+                Err(e) => warn!("Skipping {}: {}", path.display(), e),
+            }
+        }
+    }
+    vms
 }
 
 /// Parse a config file (auto-detect format from extension)

@@ -6,6 +6,7 @@ mod hardware;
 mod metadata;
 mod ui;
 mod vm;
+mod wizard_types;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::CreateWizardState;
+use crate::wizard_types::CreateWizardState;
 
 #[test]
 fn test_shell_escape_safe_strings() {
