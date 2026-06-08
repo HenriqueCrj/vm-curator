@@ -84,16 +84,14 @@ fn parse_libvirt_xml_str(xml: &str, config_path: &Path) -> Result<ImportableVm> 
                     "name" if parent == "domain" => {
                         capture_text_for = Some("name".to_string());
                     }
-                    "memory" | "currentMemory" => {
-                        if memory_kb == 0 {
-                            memory_unit = "KiB".to_string();
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"unit" {
-                                    memory_unit = attr_value(&attr);
-                                }
+                    "memory" | "currentMemory" if memory_kb == 0 => {
+                        memory_unit = "KiB".to_string();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"unit" {
+                                memory_unit = attr_value(&attr);
                             }
-                            capture_text_for = Some("memory".to_string());
                         }
+                        capture_text_for = Some("memory".to_string());
                     }
                     "vcpu" => {
                         capture_text_for = Some("vcpu".to_string());
@@ -663,7 +661,9 @@ fn get_quickemu_search_dirs() -> Vec<PathBuf> {
 #[allow(dead_code)]
 pub fn discover_vms_in_dir(dir: &Path) -> Vec<ImportableVm> {
     let mut vms = Vec::new();
-    let Ok(entries) = fs::read_dir(dir) else { return vms };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return vms;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
@@ -699,8 +699,7 @@ pub fn execute_import(
     disk_action: ImportDiskAction,
 ) -> Result<PathBuf> {
     use crate::vm::create::{
-        create_vm_directory, generate_launch_script_with_os, write_launch_script,
-        write_vm_metadata,
+        create_vm_directory, generate_launch_script_with_os, write_launch_script, write_vm_metadata,
     };
 
     let vm_dir = create_vm_directory(library_path, folder_name)?;
@@ -722,9 +721,8 @@ pub fn execute_import(
 
         match disk_action {
             ImportDiskAction::Symlink => {
-                let abs_source = fs::canonicalize(disk_path).with_context(|| {
-                    format!("Failed to resolve path: {}", disk_path.display())
-                })?;
+                let abs_source = fs::canonicalize(disk_path)
+                    .with_context(|| format!("Failed to resolve path: {}", disk_path.display()))?;
                 unix_fs::symlink(&abs_source, &dest).with_context(|| {
                     format!(
                         "Failed to create symlink from {} to {}",

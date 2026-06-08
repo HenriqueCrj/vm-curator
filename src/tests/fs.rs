@@ -3,10 +3,9 @@ use std::path::PathBuf;
 
 #[test]
 fn test_is_btrfs_nonexistent() {
-    // Should not panic on non-existent path
-    let result = is_btrfs(&PathBuf::from("/nonexistent/path/12345"));
-    // Result depends on root filesystem type
-    assert!(result == true || result == false);
+    // Should not panic on non-existent path; the bool value depends on the
+    // root filesystem type, so we only assert that the call returns cleanly.
+    let _result = is_btrfs(&PathBuf::from("/nonexistent/path/12345"));
 }
 
 #[test]

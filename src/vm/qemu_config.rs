@@ -66,6 +66,9 @@ pub enum VgaType {
 }
 
 impl VgaType {
+    // Infallible parser (unknown values map to `Other`), so an inherent method is
+    // more ergonomic than the fallible `std::str::FromStr` trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "std" => Self::Std,
@@ -91,7 +94,9 @@ pub enum AudioDevice {
 }
 
 impl AudioDevice {
-    #[allow(dead_code)]
+    // Infallible parser (unknown values map to `Other`), so an inherent method is
+    // more ergonomic than the fallible `std::str::FromStr` trait.
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "sb16" => Self::Sb16,
@@ -139,7 +144,11 @@ pub struct PortForward {
 
 impl fmt::Display for PortForward {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} -> {}", self.protocol, self.host_port, self.guest_port)
+        write!(
+            f,
+            "{} {} -> {}",
+            self.protocol, self.host_port, self.guest_port
+        )
     }
 }
 
@@ -322,22 +331,29 @@ mod tests {
 
     #[test]
     fn has_gl_acceleration_detects_device() {
-        let mut cfg = QemuConfig::default();
-        cfg.raw_script = "qemu-system-x86_64 \\\n  -device virtio-vga-gl \\\n  -display sdl,gl=on".to_string();
+        let cfg = QemuConfig {
+            raw_script: "qemu-system-x86_64 \\\n  -device virtio-vga-gl \\\n  -display sdl,gl=on"
+                .to_string(),
+            ..Default::default()
+        };
         assert!(cfg.has_gl_acceleration());
     }
 
     #[test]
     fn has_gl_acceleration_detects_extra_arg() {
-        let mut cfg = QemuConfig::default();
-        cfg.extra_args = vec!["-display gtk,gl=on".to_string()];
+        let cfg = QemuConfig {
+            extra_args: vec!["-display gtk,gl=on".to_string()],
+            ..Default::default()
+        };
         assert!(cfg.has_gl_acceleration());
     }
 
     #[test]
     fn has_gl_acceleration_negative() {
-        let mut cfg = QemuConfig::default();
-        cfg.raw_script = "qemu-system-x86_64 \\\n  -vga std \\\n  -display gtk".to_string();
+        let cfg = QemuConfig {
+            raw_script: "qemu-system-x86_64 \\\n  -vga std \\\n  -display gtk".to_string(),
+            ..Default::default()
+        };
         assert!(!cfg.has_gl_acceleration());
     }
 }

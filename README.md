@@ -196,7 +196,7 @@ The binary will be at `target/release/vm-curator`.
 
 **Prerequisites**
 - **Required**: QEMU (`qemu-system-*` binaries), qemu-img (for disk creation and snapshots), libudev
-- **Build**: Rust 1.70+, libudev-dev (Debian/Ubuntu) or systemd-libs (Arch/Fedora)
+- **Build**: a recent Rust stable toolchain (see `rust-toolchain.toml`), libudev-dev (Debian/Ubuntu) or systemd-libs (Arch/Fedora)
 - **Optional**:
   - OVMF/edk2 — UEFI boot support (`edk2-ovmf` on Arch, `ovmf` on Debian/Ubuntu)
   - virt-viewer — SPICE-app display backend
@@ -410,7 +410,7 @@ facts = ["Fact 1", "Fact 2"]
 ### Dependencies
 
 - **Runtime**: QEMU, qemu-img, libudev
-- **Build**: Rust 1.70+, libudev-dev (Debian/Ubuntu) or systemd-libs (Arch)
+- **Build**: a recent Rust stable toolchain (see `rust-toolchain.toml`), libudev-dev (Debian/Ubuntu) or systemd-libs (Arch)
 - **Optional**: OVMF/edk2 (UEFI), virt-viewer (SPICE-app), passt (networking), Looking Glass client (multi-GPU), polkit (bridge networking)
 
 ### Cross-Distribution Compatibility

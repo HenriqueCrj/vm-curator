@@ -665,18 +665,10 @@ fn parse_hostfwd_segment(segment: &str) -> Option<PortForward> {
     };
 
     // Extract host port (last number in host_part after protocol)
-    let host_port: u16 = host_part
-        .rsplit(':')
-        .next()?
-        .parse()
-        .ok()?;
+    let host_port: u16 = host_part.rsplit(':').next()?.parse().ok()?;
 
     // Extract guest port (last number in guest_part)
-    let guest_port: u16 = guest_part
-        .rsplit(':')
-        .next()?
-        .parse()
-        .ok()?;
+    let guest_port: u16 = guest_part.rsplit(':').next()?.parse().ok()?;
 
     Some(PortForward {
         protocol,
@@ -700,9 +692,8 @@ fn extract_bios_path(content: &str, vm_dir: &Path) -> Option<PathBuf> {
 
         if let Some(idx) = trimmed.find("-bios ") {
             let rest = &trimmed[idx + 6..];
-            let raw_path = if rest.starts_with('"') {
+            let raw_path = if let Some(inner) = rest.strip_prefix('"') {
                 // Quoted path like -bios "$ROM"
-                let inner = &rest[1..];
                 if let Some(end) = inner.find('"') {
                     inner[..end].to_string()
                 } else {

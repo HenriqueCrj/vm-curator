@@ -70,7 +70,7 @@ fn is_btrfs_from_mounts(path: &Path) -> bool {
         })
         .collect();
 
-    mount_entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    mount_entries.sort_by_key(|e| std::cmp::Reverse(e.0.len()));
 
     for (mount_point, fs_type) in mount_entries {
         if path_str.starts_with(mount_point) || mount_point == "/" {
@@ -95,9 +95,7 @@ pub fn disable_cow(path: &Path) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Don't fail if chattr isn't available or permission denied
         // Just log and continue - this is an optimization, not critical
-        if !stderr.contains("Operation not supported")
-            && !stderr.contains("Inappropriate ioctl")
-        {
+        if !stderr.contains("Operation not supported") && !stderr.contains("Inappropriate ioctl") {
             anyhow::bail!("chattr +C failed: {}", stderr.trim());
         }
     }
