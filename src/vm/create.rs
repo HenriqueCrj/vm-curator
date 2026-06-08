@@ -827,6 +827,16 @@ fi
     script
 }
 
+/// SPICE guest-agent channel — enables clipboard sharing (copy/paste) between
+/// host and guest. Requires `spice-vdagent` running inside the guest. These exact
+/// strings are the single source of truth shared by command generation, in-place
+/// editing (`set_spice_agent_args`), and the dbus-display strip in `lifecycle.rs`.
+pub(crate) const SPICE_AGENT_ARGS: &[&str] = &[
+    "-device virtio-serial-pci",
+    "-chardev spicevmc,id=spicechannel0,name=vdagent",
+    "-device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0",
+];
+
 /// Build the QEMU command string with OS-awareness
 fn build_qemu_command_with_os(
     config: &WizardQemuConfig,
@@ -1077,6 +1087,13 @@ fn build_qemu_command_with_os(
         }
     }
 
+    // SPICE guest-agent channel for clipboard sharing (needs spice-vdagent in the guest)
+    if config.display == "spice-app" {
+        for a in SPICE_AGENT_ARGS {
+            args.push((*a).to_string());
+        }
+    }
+
     // Audio devices (known safe values from profiles, but escape for safety)
     for audio in &config.audio {
         match audio.as_str() {
@@ -1291,6 +1308,77 @@ pub fn update_network_in_script(
         .with_context(|| format!("Failed to write launch script: {}", script_path.display()))?;
 
     Ok(())
+}
+
+/// True if `line` is one of the managed SPICE guest-agent channel args
+/// (ignoring indentation and a trailing line-continuation backslash).
+fn is_spice_agent_line(line: &str) -> bool {
+    let mut t = line.trim();
+    if let Some(stripped) = t.strip_suffix('\\') {
+        t = stripped.trim_end();
+    }
+    SPICE_AGENT_ARGS.contains(&t)
+}
+
+/// Add or remove the SPICE guest-agent channel lines in an existing launch.sh.
+///
+/// Idempotent: any existing channel lines are stripped first, then re-added (right
+/// after each `-display` continuation line) only when `enable` is true. This lets the
+/// management screen toggle clipboard support as the display backend is switched to or
+/// away from `spice-app`, without duplicating or orphaning args. Indentation and the
+/// trailing-backslash continuation style are matched to the surrounding `-display` line.
+pub fn set_spice_agent_args(content: &str, enable: bool) -> String {
+    let ends_with_newline = content.ends_with('\n');
+
+    // Pass 1: strip any existing agent lines so repeated calls are idempotent.
+    let stripped: Vec<String> = content
+        .lines()
+        .filter(|line| !is_spice_agent_line(line))
+        .map(|s| s.to_string())
+        .collect();
+
+    let lines: Vec<String> = if enable {
+        let mut out: Vec<String> = Vec::with_capacity(stripped.len() + SPICE_AGENT_ARGS.len());
+        for line in stripped {
+            let t = line.trim_start();
+            let is_display = !t.starts_with('#') && t.starts_with("-display ");
+            if !is_display {
+                out.push(line);
+                continue;
+            }
+
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = line[..indent_len].to_string();
+            if line.trim_end().ends_with('\\') {
+                // Mid-command display line: keep it, append continued agent lines.
+                out.push(line);
+                for a in SPICE_AGENT_ARGS {
+                    out.push(format!("{}{} \\", indent, a));
+                }
+            } else {
+                // Display was the command's last line: extend the continuation and
+                // leave the final agent line without a trailing backslash.
+                out.push(format!("{} \\", line.trim_end()));
+                let last = SPICE_AGENT_ARGS.len() - 1;
+                for (idx, a) in SPICE_AGENT_ARGS.iter().enumerate() {
+                    if idx == last {
+                        out.push(format!("{}{}", indent, a));
+                    } else {
+                        out.push(format!("{}{} \\", indent, a));
+                    }
+                }
+            }
+        }
+        out
+    } else {
+        stripped
+    };
+
+    let mut s = lines.join("\n");
+    if ends_with_newline {
+        s.push('\n');
+    }
+    s
 }
 
 /// Generate network argument lines for a launch script

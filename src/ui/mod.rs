@@ -1404,11 +1404,15 @@ fn handle_display_options(app: &mut App, key: KeyEvent) -> Result<()> {
                 if let Some(vm) = app.selected_vm() {
                     match update_vm_display(&vm.launch_script, &display_name) {
                         Ok(()) => {
-                            // Show spice-app warning if viewer not installed
-                            if display_name.contains("spice")
-                                && !crate::commands::qemu_system::is_spice_viewer_available()
-                            {
-                                app.set_status(format!("Display changed to {}. Warning: virt-viewer/remote-viewer not found!", display_name));
+                            // For spice-app, surface the two things the user still
+                            // needs: a viewer on the host and spice-vdagent in the guest
+                            // (clipboard channel is now added to launch.sh automatically).
+                            if display_name.contains("spice") {
+                                if crate::commands::qemu_system::is_spice_viewer_available() {
+                                    app.set_status(format!("Display changed to {}. Clipboard sharing enabled — install & start spice-vdagent in the guest, then reboot it.", display_name));
+                                } else {
+                                    app.set_status(format!("Display changed to {}. Warning: virt-viewer/remote-viewer not found! For clipboard, also run spice-vdagent in the guest.", display_name));
+                                }
                             } else {
                                 app.set_status(format!("Display changed to {}", display_name));
                             }
@@ -1518,6 +1522,12 @@ fn update_vm_display(script_path: &std::path::Path, new_display: &str) -> Result
         // but handle gracefully
         content
     };
+
+    // Add the SPICE guest-agent channel (clipboard sharing) when switching to
+    // spice-app; remove it when switching away. Keeps copy/paste working without
+    // any extra UI (still requires spice-vdagent running in the guest).
+    let new_content =
+        crate::vm::create::set_spice_agent_args(&new_content, new_display == "spice-app");
 
     std::fs::write(script_path, new_content)?;
     Ok(())

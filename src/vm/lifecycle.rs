@@ -381,10 +381,14 @@ fn replace_display_for_dbus(content: &str, replacement: &str) -> String {
         let t = line.trim();
         let is_display =
             !t.starts_with('#') && (t.starts_with("-display ") || t.contains(" -display "));
+        let bare = t.trim_end_matches('\\').trim_end();
         let is_spice = t.starts_with("-spice ")
             || (t.starts_with("-device virtio-serial") && t.contains("spice"))
             || (t.starts_with("-device virtserialport") && t.contains("com.redhat.spice"))
-            || t.starts_with("-chardev spice");
+            || t.starts_with("-chardev spice")
+            // SPICE clipboard channel (e.g. `-device virtio-serial-pci`) — incompatible
+            // with the dbus display used for single-GPU passthrough.
+            || crate::vm::create::SPICE_AGENT_ARGS.contains(&bare);
         if is_display {
             let indent_len = line.len() - line.trim_start().len();
             let indent = &line[..indent_len];

@@ -585,6 +585,85 @@ fn test_macos_spice_audio() {
 }
 
 #[test]
+fn test_spice_app_emits_agent_channel() {
+    // spice-app display should add the full SPICE guest-agent channel for clipboard.
+    let config = WizardQemuConfig {
+        display: "spice-app".to_string(),
+        ..WizardQemuConfig::default()
+    };
+    let cmd = build_qemu_command_with_os(&config, "disk.qcow2", &InstallMedia::None, None, None);
+
+    for arg in SPICE_AGENT_ARGS {
+        assert!(
+            cmd.contains(arg),
+            "spice-app command should contain agent arg `{}`",
+            arg
+        );
+    }
+}
+
+#[test]
+fn test_non_spice_display_has_no_agent_channel() {
+    let config = WizardQemuConfig {
+        display: "gtk".to_string(),
+        ..WizardQemuConfig::default()
+    };
+    let cmd = build_qemu_command_with_os(&config, "disk.qcow2", &InstallMedia::None, None, None);
+
+    for arg in SPICE_AGENT_ARGS {
+        assert!(
+            !cmd.contains(arg),
+            "gtk command should NOT contain agent arg `{}`",
+            arg
+        );
+    }
+}
+
+#[test]
+fn test_spice_agent_channel_with_gl_acceleration() {
+    // virtio-vga-gl + spice-app should still carry the agent channel.
+    let config = WizardQemuConfig {
+        display: "spice-app".to_string(),
+        vga: "virtio".to_string(),
+        gl_acceleration: true,
+        ..WizardQemuConfig::default()
+    };
+    let cmd = build_qemu_command_with_os(&config, "disk.qcow2", &InstallMedia::None, None, None);
+
+    assert!(cmd.contains("-device virtio-vga-gl"), "GL device present");
+    assert!(cmd.contains("-display spice-app,gl=on"), "gl display present");
+    for arg in SPICE_AGENT_ARGS {
+        assert!(cmd.contains(arg), "agent arg `{}` present with GL", arg);
+    }
+}
+
+#[test]
+fn test_set_spice_agent_args_add_remove_roundtrip() {
+    let original = "#!/bin/bash\nqemu-system-x86_64 \\\n        -m 2048 \\\n        -display gtk \\\n        -qmp unix:sock,server=on,wait=off\n";
+
+    // Enabling inserts the three channel lines right after -display.
+    let enabled = set_spice_agent_args(original, true);
+    for arg in SPICE_AGENT_ARGS {
+        assert!(enabled.contains(arg), "enabled script contains `{}`", arg);
+    }
+    let display_idx = enabled.find("-display gtk").unwrap();
+    let agent_idx = enabled.find(SPICE_AGENT_ARGS[0]).unwrap();
+    assert!(agent_idx > display_idx, "agent args inserted after -display");
+
+    // Enabling again must not duplicate.
+    let enabled_twice = set_spice_agent_args(&enabled, true);
+    assert_eq!(
+        enabled_twice.matches(SPICE_AGENT_ARGS[0]).count(),
+        1,
+        "no duplicate agent args on repeated enable"
+    );
+
+    // Disabling removes them and restores the original byte-for-byte.
+    let disabled = set_spice_agent_args(&enabled_twice, false);
+    assert_eq!(disabled, original, "round-trip restores original script");
+}
+
+#[test]
 fn test_macos_usb_kbd() {
     let config = macos_uefi_config();
     let cmd = build_qemu_command_with_os(

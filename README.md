@@ -97,6 +97,15 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 - Add, remove, and edit shared folders from the management menu
 - Automatic mount tag generation
 
+**Clipboard Sharing (SPICE)**
+- Bidirectional host ⇄ guest copy/paste when the display backend is `spice-app`
+- The SPICE guest-agent channel is added to `launch.sh` automatically — no extra configuration
+- Requires `virt-viewer`/`remote-viewer` on the host and `spice-vdagent` running in the guest:
+  - Debian/Ubuntu/Kali: `sudo apt install spice-vdagent`
+  - Fedora/RHEL: `sudo dnf install spice-vdagent`
+  - Arch: `sudo pacman -S spice-vdagent`
+  - Then enable the service (`sudo systemctl enable --now spice-vdagentd`) and reboot the guest
+
 **USB Passthrough**
 - USB device enumeration via libudev with sysfs fallback
 - xHCI USB 3.0 controller with 8 ports (supports up to 8 USB 2.0 + 8 USB 3.0 devices)

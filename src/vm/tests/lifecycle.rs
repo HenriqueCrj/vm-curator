@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn test_replace_display_for_dbus_strips_spice_agent_channel() {
+    use crate::vm::create::SPICE_AGENT_ARGS;
+
+    // A spice-app launch command with the clipboard channel present.
+    let script = "#!/bin/bash\nqemu-system-x86_64 \\\n        -display spice-app \\\n        -device virtio-serial-pci \\\n        -chardev spicevmc,id=spicechannel0,name=vdagent \\\n        -device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0 \\\n        -qmp unix:sock,server=on,wait=off\n";
+
+    let dbus = replace_display_for_dbus(script, "-display dbus");
+
+    for arg in SPICE_AGENT_ARGS {
+        assert!(
+            !dbus.contains(arg),
+            "dbus script should not contain agent arg `{}`",
+            arg
+        );
+    }
+    assert!(dbus.contains("-display dbus"), "display swapped to dbus");
+}
+
+#[test]
 fn test_generate_shared_folders_section_empty() {
     let section = generate_shared_folders_section(&[], "virtio-9p-pci");
     assert!(section.is_empty());
