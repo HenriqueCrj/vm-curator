@@ -1,3 +1,14 @@
+//! Application state machine.
+//!
+//! [`App`] owns all runtime state for the TUI, and the [`Screen`] enum enumerates
+//! the views the user can be on. Navigation is a stack (`push_screen`/`pop_screen`)
+//! so screens can return to wherever they were opened from. Long-running work (VM
+//! launch, snapshot operations) runs on background threads and reports back through
+//! `mpsc` channels that the main loop drains via `try_recv` each tick.
+//!
+//! This module is part of the binary only — it depends on the `ui` layer and is
+//! intentionally excluded from the public library API (see the crate root docs).
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -519,7 +519,7 @@ pub fn save_notes(vm: &DiscoveredVm, notes: Option<&str>) -> Result<()> {
 pub struct QemuProcess {
     pub pid: u32,
     pub cmdline: String,
-    /// The working directory of the process (from /proc/<pid>/cwd)
+    /// The working directory of the process (from `/proc/<pid>/cwd`)
     pub cwd: Option<std::path::PathBuf>,
 }
 
@@ -1237,6 +1237,10 @@ bind_vfio || exit 1
 }
 
 // ── QMP (QEMU Machine Protocol) ─────────────────────────────────────────────
+//
+// The items below are `#[allow(dead_code)]` infrastructure for planned
+// runtime VM control (pause/resume, GUI embedding via D-Bus). They are wired up
+// but not yet surfaced in the UI — intentional, not dead.
 
 #[allow(dead_code)]
 const QMP_ARG: &str = "        -qmp unix:$VM_DIR/qemu.sock,server=on,wait=off";

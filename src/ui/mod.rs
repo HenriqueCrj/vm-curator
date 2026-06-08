@@ -1,3 +1,12 @@
+//! Terminal rendering and input dispatch.
+//!
+//! This module is the front-end event loop: [`run`] drives the draw/poll cycle,
+//! the render path matches on [`crate::app::Screen`] and delegates to the
+//! per-screen modules in [`screens`], and the key/mouse handlers route input the
+//! same way. Reusable rendering pieces live in [`widgets`]. Screen-specific layout
+//! and input logic stays in the individual `screens::*` modules; this file is the
+//! dispatcher that ties them to the [`crate::app::App`] state.
+
 pub mod screens;
 pub mod widgets;
 

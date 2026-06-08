@@ -189,6 +189,10 @@ impl WizardQemuConfig {
 }
 
 /// Custom OS entry for when user selects "Other"
+///
+/// Some fields below are `#[allow(dead_code)]`: they are captured by the entry
+/// form but not yet consumed, reserved for the planned "save custom OS to user
+/// metadata" feature. They are intentional, not dead.
 #[derive(Debug, Clone, Default)]
 pub struct CustomOsEntry {
     pub id: String,
@@ -246,6 +250,7 @@ pub struct CreateWizardState {
     pub qemu_config: WizardQemuConfig,
     pub auto_launch: bool,
     pub field_focus: usize,
+    // Reserved for planned scroll/category-aware OS picker UI; not read yet.
     #[allow(dead_code)]
     pub os_list_scroll: usize,
     pub os_filter: String,
