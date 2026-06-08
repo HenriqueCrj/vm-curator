@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Run on pushes to main (post-merge) and on every PR. Branch pushes are covered
+  # by the pull_request trigger, avoiding duplicate runs on PR branches.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
 env:
