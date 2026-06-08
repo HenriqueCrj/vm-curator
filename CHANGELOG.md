@@ -1,5 +1,14 @@
 # Changelog
 
+**v1.0.0**
+- **First stable release.** Focus of this release is release-engineering and code-hardening rather than new features; behavior is unchanged for existing users.
+- **CI quality gates** (`.github/workflows/ci.yml`): every push and pull request now runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test --locked`, and `cargo audit`. Previously nothing ran tests or lints before a release tag was cut.
+- **Toolchain pin**: added `rust-toolchain.toml` (stable + clippy/rustfmt) so local, contributor, and CI builds agree; dropped the unenforced "Rust 1.70+" MSRV claim from the README.
+- **Lint clean-up**: added `#![warn(clippy::all)]` and fixed all clippy findings under `-D warnings`; the whole codebase is now `cargo fmt`-clean.
+- **Expanded test coverage**: new tests for `qemu-img` disk-format JSON parsing and for `Config` load/save (round-trip, partial/malformed TOML), via new path-parameterized `Config::load_from`/`save_to` helpers.
+- **Import parser refactor**: the ~360-line libvirt XML parser was split into a small state struct with focused per-event/element helpers; behavior-preserving, with added regression tests.
+- **Documentation**: crate-level public-API docs on the library root, module docs for the app state machine and UI dispatcher, and clarifying comments on intentional future-API `dead_code`; `cargo doc` is warning-free.
+
 **v0.4.10**
 - **First release with external contributions** — many thanks to [@Ibn-Hesham](https://github.com/Ibn-Hesham) and [@nextzard](https://github.com/nextzard) for the patches below!
 - **Nix Flake** (thanks @Ibn-Hesham, #32): Reproducible builds and dev shell. Adds `flake.nix` with `packages.default`, `devShells.default`, and `apps.default` outputs, plus a `flake.lock`. README updated with Nix/NixOS installation instructions. Build artifacts excluded via `.gitignore`.
