@@ -1,3 +1,14 @@
+//! Application state machine.
+//!
+//! [`App`] owns all runtime state for the TUI, and the [`Screen`] enum enumerates
+//! the views the user can be on. Navigation is a stack (`push_screen`/`pop_screen`)
+//! so screens can return to wherever they were opened from. Long-running work (VM
+//! launch, snapshot operations) runs on background threads and reports back through
+//! `mpsc` channels that the main loop drains via `try_recv` each tick.
+//!
+//! This module is part of the binary only — it depends on the `ui` layer and is
+//! intentionally excluded from the public library API (see the crate root docs).
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -7,9 +18,14 @@ use std::time::Instant;
 use crate::commands::qemu_system::NetworkCapabilities;
 use crate::config::Config;
 use crate::hardware::{MultiGpuPassthroughStatus, PciDevice, SingleGpuConfig, UsbDevice};
-use crate::metadata::{AsciiArtStore, HierarchyConfig, MetadataStore, OsInfo, QemuProfileStore, SettingsHelpStore, SharedFoldersHelpStore};
+use crate::metadata::{
+    AsciiArtStore, HierarchyConfig, MetadataStore, OsInfo, QemuProfileStore, SettingsHelpStore,
+    SharedFoldersHelpStore,
+};
 use crate::ui::widgets::build_visual_order;
-use crate::vm::{discover_vms, BootMode, DiscoveredVm, LaunchOptions, QemuProcess, SharedFolder, Snapshot};
+use crate::vm::{
+    discover_vms, BootMode, DiscoveredVm, LaunchOptions, QemuProcess, SharedFolder, Snapshot,
+};
 pub use crate::wizard_types::*;
 
 /// Application screens/views
@@ -266,12 +282,27 @@ pub struct FileBrowserEntry {
 
 /// Background operation result
 pub enum BackgroundResult {
-    SnapshotCreated { name: String, success: bool, error: Option<String> },
-    SnapshotRestored { name: String, success: bool, error: Option<String> },
-    SnapshotDeleted { name: String, success: bool, error: Option<String> },
+    SnapshotCreated {
+        name: String,
+        success: bool,
+        error: Option<String>,
+    },
+    SnapshotRestored {
+        name: String,
+        success: bool,
+        error: Option<String>,
+    },
+    SnapshotDeleted {
+        name: String,
+        success: bool,
+        error: Option<String>,
+    },
     /// Reserved for async snapshot loading
     #[allow(dead_code)]
-    SnapshotsLoaded { snapshots: Vec<Snapshot>, error: Option<String> },
+    SnapshotsLoaded {
+        snapshots: Vec<Snapshot>,
+        error: Option<String>,
+    },
 }
 
 impl App {
@@ -459,14 +490,14 @@ impl App {
 
     /// Get available network backend options based on detected capabilities
     pub fn get_network_backend_options(&self) -> Vec<(&str, &str)> {
-        let mut options = vec![
-            ("user", "User/SLIRP (NAT) - Default, works everywhere"),
-        ];
+        let mut options = vec![("user", "User/SLIRP (NAT) - Default, works everywhere")];
         if self.network_caps.passt_available {
             options.push(("passt", "passt - Fast NAT, ping works"));
         }
         if self.network_caps.bridge_helper_path.is_some() {
-            if !self.network_caps.system_bridges.is_empty() && self.network_caps.bridge_helper_configured {
+            if !self.network_caps.system_bridges.is_empty()
+                && self.network_caps.bridge_helper_configured
+            {
                 options.push(("bridge", "Bridge - Full network, own IP"));
             } else {
                 options.push(("bridge", "Bridge - Requires one-time setup"));
@@ -568,7 +599,12 @@ impl App {
         }
 
         // Rebuild visual order for hierarchy navigation
-        self.visual_order = build_visual_order(&self.vms, &self.filtered_indices, &self.hierarchy, &self.metadata);
+        self.visual_order = build_visual_order(
+            &self.vms,
+            &self.filtered_indices,
+            &self.hierarchy,
+            &self.metadata,
+        );
 
         // Reset selection if out of bounds
         if self.selected_vm >= self.visual_order.len() {
@@ -682,7 +718,8 @@ impl App {
 
     /// Remove the currently selected shared folder
     pub fn remove_shared_folder(&mut self) {
-        if !self.shared_folders.is_empty() && self.shared_folder_selected < self.shared_folders.len()
+        if !self.shared_folders.is_empty()
+            && self.shared_folder_selected < self.shared_folders.len()
         {
             self.shared_folders.remove(self.shared_folder_selected);
             if self.shared_folder_selected >= self.shared_folders.len()
@@ -724,7 +761,11 @@ impl App {
 
             // Try to find and select the paired audio device
             if let Some(audio) = crate::hardware::find_gpu_audio_pair(gpu, &self.pci_devices) {
-                if let Some(audio_idx) = self.pci_devices.iter().position(|d| d.address == audio.address) {
+                if let Some(audio_idx) = self
+                    .pci_devices
+                    .iter()
+                    .position(|d| d.address == audio.address)
+                {
                     self.selected_pci_devices.push(audio_idx);
                 }
             }
@@ -801,7 +842,11 @@ impl App {
         while let Ok(result) = self.background_rx.try_recv() {
             self.loading = false;
             match result {
-                BackgroundResult::SnapshotCreated { name, success, error } => {
+                BackgroundResult::SnapshotCreated {
+                    name,
+                    success,
+                    error,
+                } => {
                     if success {
                         self.set_status(format!("Created snapshot: {}", name));
                         // Reload snapshots
@@ -810,14 +855,22 @@ impl App {
                         self.set_status(format!("Error creating snapshot: {}", e));
                     }
                 }
-                BackgroundResult::SnapshotRestored { name, success, error } => {
+                BackgroundResult::SnapshotRestored {
+                    name,
+                    success,
+                    error,
+                } => {
                     if success {
                         self.set_status(format!("Restored snapshot: {}", name));
                     } else if let Some(e) = error {
                         self.set_status(format!("Error restoring snapshot: {}", e));
                     }
                 }
-                BackgroundResult::SnapshotDeleted { name, success, error } => {
+                BackgroundResult::SnapshotDeleted {
+                    name,
+                    success,
+                    error,
+                } => {
                     if success {
                         self.set_status(format!("Deleted snapshot: {}", name));
                         let _ = self.load_snapshots();
@@ -847,7 +900,8 @@ impl App {
         if let Some(processes) = latest {
             self.running_vms = self.match_running_vms(&processes);
             // Clean up stopping_vms for VMs that have actually stopped
-            self.stopping_vms.retain(|id, _| self.running_vms.contains_key(id));
+            self.stopping_vms
+                .retain(|id, _| self.running_vms.contains_key(id));
         }
     }
 
@@ -915,8 +969,12 @@ impl App {
             FileBrowserMode::Disk => &[".qcow2", ".QCOW2", ".qcow", ".QCOW"],
             FileBrowserMode::Directory => &[],
             FileBrowserMode::ImportConfig => &[".xml", ".XML", ".conf"],
-            FileBrowserMode::Bios => &[".bin", ".BIN", ".rom", ".ROM", ".qcow2", ".QCOW2", ".fd", ".FD"],
-            FileBrowserMode::Floppy => &[".img", ".IMG", ".ima", ".IMA", ".flp", ".FLP", ".vfd", ".VFD"],
+            FileBrowserMode::Bios => &[
+                ".bin", ".BIN", ".rom", ".ROM", ".qcow2", ".QCOW2", ".fd", ".FD",
+            ],
+            FileBrowserMode::Floppy => &[
+                ".img", ".IMG", ".ima", ".IMA", ".flp", ".FLP", ".vfd", ".VFD",
+            ],
         };
 
         // For Directory mode, add a [Select This Directory] sentinel entry first
@@ -965,8 +1023,8 @@ impl App {
             }
 
             // Sort alphabetically
-            dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            dirs.sort_by_key(|e| e.name.to_lowercase());
+            files.sort_by_key(|e| e.name.to_lowercase());
 
             self.file_browser_entries.extend(dirs);
             self.file_browser_entries.extend(files);
@@ -1023,7 +1081,8 @@ impl App {
     /// Save the editor content back to the launch.sh file
     pub fn save_script_from_editor(&mut self) -> Result<()> {
         // Get the launch script path before we need mutable access
-        let launch_script_path = self.selected_vm()
+        let launch_script_path = self
+            .selected_vm()
             .map(|vm| vm.launch_script.clone())
             .ok_or_else(|| anyhow::anyhow!("No VM selected"))?;
 
@@ -1084,7 +1143,8 @@ impl App {
 
     /// Save the editor content as notes to vm-curator.toml
     pub fn save_notes_from_editor(&mut self) -> Result<()> {
-        let vm = self.selected_vm()
+        let vm = self
+            .selected_vm()
             .ok_or_else(|| anyhow::anyhow!("No VM selected"))?;
 
         let vm_path = vm.path.clone();
@@ -1094,7 +1154,11 @@ impl App {
         let notes_text = self.script_editor_lines.join("\n");
         // Trim trailing whitespace/newlines
         let notes_text = notes_text.trim_end().to_string();
-        let notes = if notes_text.is_empty() { None } else { Some(notes_text.as_str()) };
+        let notes = if notes_text.is_empty() {
+            None
+        } else {
+            Some(notes_text.as_str())
+        };
 
         crate::vm::create::write_vm_metadata(
             &vm_path,
@@ -1187,18 +1251,31 @@ impl App {
 
         // Get full display name from metadata (e.g., "CachyOS (rolling)")
         // Fall back to profile's display_name if not in metadata
-        let new_display_name = self.metadata.get(os_id)
+        let new_display_name = self
+            .metadata
+            .get(os_id)
             .and_then(|info| info.display_name.clone())
-            .or_else(|| self.qemu_profiles.get(os_id).map(|p| p.display_name.clone()))
+            .or_else(|| {
+                self.qemu_profiles
+                    .get(os_id)
+                    .map(|p| p.display_name.clone())
+            })
             .unwrap_or_else(|| os_id.to_string());
 
         // Get the previous OS's display name (if any) to check if user customized the name
-        let previous_default_name = self.wizard_state.as_ref()
+        let previous_default_name = self
+            .wizard_state
+            .as_ref()
             .and_then(|s| s.selected_os.as_ref())
             .and_then(|prev_id| {
-                self.metadata.get(prev_id)
+                self.metadata
+                    .get(prev_id)
                     .and_then(|info| info.display_name.clone())
-                    .or_else(|| self.qemu_profiles.get(prev_id).map(|p| p.display_name.clone()))
+                    .or_else(|| {
+                        self.qemu_profiles
+                            .get(prev_id)
+                            .map(|p| p.display_name.clone())
+                    })
             });
 
         if let Some(ref mut state) = self.wizard_state {
@@ -1213,7 +1290,10 @@ impl App {
                 // 1. Name is empty, OR
                 // 2. Name matches the previous OS's default (user hasn't customized it)
                 let should_update_name = state.vm_name.is_empty()
-                    || previous_default_name.as_ref().map(|n| n == &state.vm_name).unwrap_or(false);
+                    || previous_default_name
+                        .as_ref()
+                        .map(|n| n == &state.vm_name)
+                        .unwrap_or(false);
 
                 if should_update_name {
                     state.vm_name = new_display_name;

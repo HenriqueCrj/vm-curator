@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 /// This handles special characters that could cause command injection.
 fn shell_escape(s: &str) -> String {
     // If the string contains only safe characters, return as-is
-    if s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
         return s.to_string();
     }
 
@@ -21,9 +23,9 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", escaped)
 }
 
-use crate::wizard_types::{CreateWizardState, DiskAction, WizardQemuConfig};
 use crate::commands::qemu_img;
 use crate::vm::qemu_config::{PortForward, PortProtocol};
+use crate::wizard_types::{CreateWizardState, DiskAction, WizardQemuConfig};
 
 /// Install media type for QEMU command generation
 pub enum InstallMedia<'a> {
@@ -84,7 +86,9 @@ fn generate_serial() -> String {
     let mut serial = String::with_capacity(12);
 
     for _ in 0..12 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let idx = ((state >> 33) as usize) % chars.len();
         serial.push(chars[idx]);
     }
@@ -237,12 +241,13 @@ pub fn create_vm(library_path: &Path, state: &CreateWizardState) -> Result<Creat
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "rom.bin".to_string());
         let dest = vm_dir.join(&rom_filename);
-        fs::copy(rom_path, &dest)
-            .with_context(|| format!(
+        fs::copy(rom_path, &dest).with_context(|| {
+            format!(
                 "Failed to copy ROM file from {} to {}",
                 rom_path.display(),
                 dest.display()
-            ))?;
+            )
+        })?;
         qemu_config.bios_path = Some(PathBuf::from(&rom_filename));
     }
 
@@ -279,28 +284,31 @@ fn handle_existing_disk(
 
     match action {
         DiskAction::Copy => {
-            fs::copy(source, &dest)
-                .with_context(|| format!(
+            fs::copy(source, &dest).with_context(|| {
+                format!(
                     "Failed to copy disk from {} to {}",
                     source.display(),
                     dest.display()
-                ))?;
+                )
+            })?;
         }
         DiskAction::Move => {
             // Try rename first (works if on same filesystem)
             if fs::rename(source, &dest).is_err() {
                 // Rename failed (likely different filesystem), fall back to copy+delete
-                fs::copy(source, &dest)
-                    .with_context(|| format!(
+                fs::copy(source, &dest).with_context(|| {
+                    format!(
                         "Failed to copy disk from {} to {}",
                         source.display(),
                         dest.display()
-                    ))?;
-                fs::remove_file(source)
-                    .with_context(|| format!(
+                    )
+                })?;
+                fs::remove_file(source).with_context(|| {
+                    format!(
                         "Failed to remove original disk after copying: {}",
                         source.display()
-                    ))?;
+                    )
+                })?;
             }
         }
     }
@@ -319,7 +327,10 @@ pub fn write_vm_metadata(
 
     let mut content = String::new();
     content.push_str("# VM Curator metadata\n\n");
-    content.push_str(&format!("display_name = \"{}\"\n", display_name.replace('"', "\\\"")));
+    content.push_str(&format!(
+        "display_name = \"{}\"\n",
+        display_name.replace('"', "\\\"")
+    ));
 
     if let Some(profile) = os_profile {
         content.push_str(&format!("os_profile = \"{}\"\n", profile));
@@ -330,7 +341,10 @@ pub fn write_vm_metadata(
             // Multi-line: use TOML literal string
             content.push_str(&format!("notes = '''\n{}'''\n", notes_text));
         } else {
-            content.push_str(&format!("notes = \"{}\"\n", notes_text.replace('"', "\\\"")));
+            content.push_str(&format!(
+                "notes = \"{}\"\n",
+                notes_text.replace('"', "\\\"")
+            ));
         }
     }
 
@@ -380,7 +394,7 @@ fn is_intel_macos(os_profile: Option<&str>, emulator: &str) -> bool {
     if !emulator.contains("x86_64") {
         return false;
     }
-    os_profile.map_or(false, |p| p.starts_with("macos-") || p.starts_with("mac-osx-"))
+    os_profile.is_some_and(|p| p.starts_with("macos-") || p.starts_with("mac-osx-"))
 }
 
 /// Check if an OS profile is a modern macOS that requires OpenCore
@@ -406,7 +420,8 @@ fn generate_smbios_options() -> String {
     // Consumer-style SMBIOS that doesn't trigger corporate machine detection
     // Type 1: System Information
     // Type 2: Baseboard Information
-    format!(r#"# SMBIOS configuration (unique per VM to avoid Windows corporate detection)
+    format!(
+        r#"# SMBIOS configuration (unique per VM to avoid Windows corporate detection)
 SMBIOS_OPTS=(
     -smbios "type=1,manufacturer=QEMU,product=Standard PC,version=1.0,serial={system_serial},uuid={uuid}"
     -smbios "type=2,manufacturer=QEMU,product=Standard PC,version=1.0,serial={board_serial}"
@@ -469,7 +484,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"#.to_string()
+"#
+    .to_string()
 }
 
 /// Generate OVMF variables setup for UEFI
@@ -479,11 +495,11 @@ fn generate_ovmf_vars_setup(needs_secboot: bool) -> String {
         find_ovmf_secboot_vars_template()
             .unwrap_or_else(|| "/usr/share/OVMF/OVMF_VARS.fd".to_string())
     } else {
-        find_ovmf_vars_template()
-            .unwrap_or_else(|| "/usr/share/OVMF/OVMF_VARS.fd".to_string())
+        find_ovmf_vars_template().unwrap_or_else(|| "/usr/share/OVMF/OVMF_VARS.fd".to_string())
     };
 
-    format!(r#"# UEFI variables (writable copy per VM)
+    format!(
+        r#"# UEFI variables (writable copy per VM)
 OVMF_VARS_TEMPLATE="{template}"
 OVMF_VARS="$VM_DIR/OVMF_VARS.fd"
 
@@ -498,7 +514,9 @@ if [[ ! -f "$OVMF_VARS" ]]; then
     fi
 fi
 
-"#, template = ovmf_vars_template)
+"#,
+        template = ovmf_vars_template
+    )
 }
 
 /// Find OVMF_VARS template path
@@ -574,14 +592,20 @@ pub fn generate_launch_script_with_os(
     if is_recovery_image {
         // Recovery image (DMG) variable
         if let Some(path) = iso_path {
-            script.push_str(&format!("RECOVERY_IMG={}\n", shell_escape(&path.display().to_string())));
+            script.push_str(&format!(
+                "RECOVERY_IMG={}\n",
+                shell_escape(&path.display().to_string())
+            ));
         } else {
             script.push_str("RECOVERY_IMG=\"\"\n");
         }
     } else {
         // ISO variable
         if let Some(iso) = iso_path {
-            script.push_str(&format!("ISO={}\n", shell_escape(&iso.display().to_string())));
+            script.push_str(&format!(
+                "ISO={}\n",
+                shell_escape(&iso.display().to_string())
+            ));
         } else {
             script.push_str("ISO=\"\"\n");
         }
@@ -589,7 +613,10 @@ pub fn generate_launch_script_with_os(
 
     // Floppy image variable
     if let Some(floppy) = floppy_path {
-        script.push_str(&format!("FLOPPY={}\n", shell_escape(&floppy.display().to_string())));
+        script.push_str(&format!(
+            "FLOPPY={}\n",
+            shell_escape(&floppy.display().to_string())
+        ));
     }
 
     // BIOS/ROM file variable
@@ -605,7 +632,8 @@ pub fn generate_launch_script_with_os(
 
     // macOS OpenCore bootloader verification
     if is_intel_macos_vm && needs_uefi && config.bios_path.is_some() {
-        script.push_str(r#"# Verify OpenCore bootloader exists
+        script.push_str(
+            r#"# Verify OpenCore bootloader exists
 if [[ ! -f "$ROM" ]]; then
     echo "Error: OpenCore bootloader not found at $ROM"
     echo "Download from: https://github.com/kholia/OSX-KVM"
@@ -613,7 +641,8 @@ if [[ ! -f "$ROM" ]]; then
     exit 1
 fi
 
-"#);
+"#,
+        );
     }
 
     // Windows-specific: SMBIOS options
@@ -644,13 +673,35 @@ fi
     script.push_str("}\n\n");
 
     // Build QEMU commands with OS-awareness
-    let floppy_ref = if floppy_path.is_some() { Some("\"$FLOPPY\"") } else { None };
-    let base_cmd = build_qemu_command_with_os(config, disk_filename, &InstallMedia::None, os_profile, floppy_ref);
+    let floppy_ref = if floppy_path.is_some() {
+        Some("\"$FLOPPY\"")
+    } else {
+        None
+    };
+    let base_cmd = build_qemu_command_with_os(
+        config,
+        disk_filename,
+        &InstallMedia::None,
+        os_profile,
+        floppy_ref,
+    );
 
     let install_cmd = if is_recovery_image {
-        build_qemu_command_with_os(config, disk_filename, &InstallMedia::RecoveryImage(None), os_profile, floppy_ref)
+        build_qemu_command_with_os(
+            config,
+            disk_filename,
+            &InstallMedia::RecoveryImage(None),
+            os_profile,
+            floppy_ref,
+        )
     } else {
-        build_qemu_command_with_os(config, disk_filename, &InstallMedia::Iso(None), os_profile, floppy_ref)
+        build_qemu_command_with_os(
+            config,
+            disk_filename,
+            &InstallMedia::Iso(None),
+            os_profile,
+            floppy_ref,
+        )
     };
 
     // Main script logic
@@ -658,16 +709,22 @@ fi
     script.push_str("    --install)\n");
 
     if is_recovery_image {
-        script.push_str("        if [[ -z \"$RECOVERY_IMG\" ]] || [[ ! -f \"$RECOVERY_IMG\" ]]; then\n");
+        script.push_str(
+            "        if [[ -z \"$RECOVERY_IMG\" ]] || [[ ! -f \"$RECOVERY_IMG\" ]]; then\n",
+        );
         script.push_str("            echo \"Error: Recovery image not found at $RECOVERY_IMG\"\n");
-        script.push_str("            echo \"Please edit this script to set the path or use --recovery\"\n");
+        script.push_str(
+            "            echo \"Please edit this script to set the path or use --recovery\"\n",
+        );
         script.push_str("            exit 1\n");
         script.push_str("        fi\n");
         script.push_str("        echo \"Booting from recovery image...\"\n");
     } else {
         script.push_str("        if [[ -z \"$ISO\" ]] || [[ ! -f \"$ISO\" ]]; then\n");
         script.push_str("            echo \"Error: Installation ISO not found at $ISO\"\n");
-        script.push_str("            echo \"Please edit this script to set the ISO path or use --cdrom\"\n");
+        script.push_str(
+            "            echo \"Please edit this script to set the ISO path or use --cdrom\"\n",
+        );
         script.push_str("            exit 1\n");
         script.push_str("        fi\n");
         script.push_str("        echo \"Booting from installation ISO...\"\n");
@@ -693,7 +750,13 @@ fi
         script.push_str("        start_tpm\n");
     }
 
-    let cdrom_cmd = build_qemu_command_with_os(config, disk_filename, &InstallMedia::Iso(Some("\"$2\"")), os_profile, floppy_ref);
+    let cdrom_cmd = build_qemu_command_with_os(
+        config,
+        disk_filename,
+        &InstallMedia::Iso(Some("\"$2\"")),
+        os_profile,
+        floppy_ref,
+    );
     script.push_str(&format!("        {}\n", cdrom_cmd));
     script.push_str("        ;;\n");
 
@@ -709,7 +772,13 @@ fi
         script.push_str("        start_tpm\n");
     }
 
-    let recovery_cmd = build_qemu_command_with_os(config, disk_filename, &InstallMedia::RecoveryImage(Some("\"$2\"")), os_profile, floppy_ref);
+    let recovery_cmd = build_qemu_command_with_os(
+        config,
+        disk_filename,
+        &InstallMedia::RecoveryImage(Some("\"$2\"")),
+        os_profile,
+        floppy_ref,
+    );
     script.push_str(&format!("        {}\n", recovery_cmd));
     script.push_str("        ;;\n");
 
@@ -725,7 +794,13 @@ fi
         script.push_str("        start_tpm\n");
     }
 
-    let floppy_cmd = build_qemu_command_with_os(config, disk_filename, &InstallMedia::None, os_profile, Some("\"$2\""));
+    let floppy_cmd = build_qemu_command_with_os(
+        config,
+        disk_filename,
+        &InstallMedia::None,
+        os_profile,
+        Some("\"$2\""),
+    );
     script.push_str(&format!("        {}\n", floppy_cmd));
     script.push_str("        ;;\n");
 
@@ -827,8 +902,7 @@ fn build_qemu_command_with_os(
                 .or_else(find_ovmf_code_path)
                 .unwrap_or_else(|| "/usr/share/OVMF/OVMF_CODE.fd".to_string())
         } else {
-            find_ovmf_code_path()
-                .unwrap_or_else(|| "/usr/share/OVMF/OVMF_CODE.fd".to_string())
+            find_ovmf_code_path().unwrap_or_else(|| "/usr/share/OVMF/OVMF_CODE.fd".to_string())
         };
         // OVMF_CODE is read-only
         args.push(format!(
@@ -869,7 +943,11 @@ fn build_qemu_command_with_os(
                     args.push("-device ide-hd,drive=oc,bus=sata.0".to_string());
                 }
                 // Main disk (sata.1 with OpenCore, sata.0 without)
-                let disk_bus = if config.bios_path.is_some() { "sata.1" } else { "sata.0" };
+                let disk_bus = if config.bios_path.is_some() {
+                    "sata.1"
+                } else {
+                    "sata.0"
+                };
                 args.push("-drive file=\"$DISK\",format=qcow2,if=none,id=maindisk".to_string());
                 args.push(format!("-device ide-hd,drive=maindisk,bus={}", disk_bus));
             } else {
@@ -893,18 +971,31 @@ fn build_qemu_command_with_os(
             let iso_ref = custom_path.unwrap_or("\"$ISO\"");
             match machine_name {
                 "q800" => {
-                    args.push(format!("-drive file={},format=raw,if=none,id=cd0,media=cdrom", iso_ref));
+                    args.push(format!(
+                        "-drive file={},format=raw,if=none,id=cd0,media=cdrom",
+                        iso_ref
+                    ));
                     args.push("-device scsi-cd,drive=cd0".to_string());
                 }
                 "mac99" => {
-                    args.push(format!("-drive file={},format=raw,if=none,id=cd0,media=cdrom", iso_ref));
+                    args.push(format!(
+                        "-drive file={},format=raw,if=none,id=cd0,media=cdrom",
+                        iso_ref
+                    ));
                     args.push("-device ide-cd,drive=cd0,bus=ide.1".to_string());
                 }
                 _ => {
                     if is_intel_macos_vm && needs_uefi {
                         // macOS UEFI: attach ISO on AHCI bus
-                        let iso_bus = if config.bios_path.is_some() { "sata.3" } else { "sata.2" };
-                        args.push(format!("-drive file={},format=raw,if=none,id=cd0,media=cdrom", iso_ref));
+                        let iso_bus = if config.bios_path.is_some() {
+                            "sata.3"
+                        } else {
+                            "sata.2"
+                        };
+                        args.push(format!(
+                            "-drive file={},format=raw,if=none,id=cd0,media=cdrom",
+                            iso_ref
+                        ));
                         args.push(format!("-device ide-cd,drive=cd0,bus={}", iso_bus));
                         // No -boot d for macOS (OpenCore handles boot)
                     } else {
@@ -926,12 +1017,25 @@ fn build_qemu_command_with_os(
             if is_intel_macos_vm && needs_uefi {
                 // macOS UEFI: attach recovery image on AHCI bus
                 // No format= specified — QEMU auto-detects DMG vs qcow2
-                let recovery_bus = if config.bios_path.is_some() { "sata.2" } else { "sata.1" };
-                args.push(format!("-drive file={},snapshot=on,if=none,id=recovery", dmg_ref));
-                args.push(format!("-device ide-hd,drive=recovery,bus={}", recovery_bus));
+                let recovery_bus = if config.bios_path.is_some() {
+                    "sata.2"
+                } else {
+                    "sata.1"
+                };
+                args.push(format!(
+                    "-drive file={},snapshot=on,if=none,id=recovery",
+                    dmg_ref
+                ));
+                args.push(format!(
+                    "-device ide-hd,drive=recovery,bus={}",
+                    recovery_bus
+                ));
             } else {
                 // Non-macOS UEFI: use legacy IDE attachment
-                args.push(format!("-drive file={},snapshot=on,format=dmg,if=ide,index=2,media=disk", dmg_ref));
+                args.push(format!(
+                    "-drive file={},snapshot=on,format=dmg,if=ide,index=2,media=disk",
+                    dmg_ref
+                ));
             }
             // No -boot d: OpenCore/UEFI bootloader handles boot selection
         }
@@ -1030,7 +1134,10 @@ fn build_qemu_command_with_os(
                         PortProtocol::Tcp => "tcp",
                         PortProtocol::Udp => "udp",
                     };
-                    netdev.push_str(&format!(",hostfwd={}::{}-:{}", proto, pf.host_port, pf.guest_port));
+                    netdev.push_str(&format!(
+                        ",hostfwd={}::{}-:{}",
+                        proto, pf.host_port, pf.guest_port
+                    ));
                 }
                 args.push(netdev);
                 args.push(format!("-device {},netdev=net0{}", net_device, mac_suffix));
@@ -1105,7 +1212,8 @@ pub fn update_network_in_script(
         .with_context(|| format!("Failed to read launch script: {}", script_path.display()))?;
 
     // Build new network arguments
-    let new_net_args = generate_network_args(model, backend, bridge_name, port_forwards, mac_address);
+    let new_net_args =
+        generate_network_args(model, backend, bridge_name, port_forwards, mac_address);
 
     // Remove existing network lines and replace
     let mut new_lines = Vec::new();
@@ -1215,12 +1323,21 @@ fn generate_network_args(
         }
         "passt" => {
             args.push("        -netdev passt,id=net0 \\".to_string());
-            args.push(format!("        -device {},netdev=net0{} \\", net_device, mac_suffix));
+            args.push(format!(
+                "        -device {},netdev=net0{} \\",
+                net_device, mac_suffix
+            ));
         }
         "bridge" => {
             let br = bridge_name.unwrap_or("qemubr0");
-            args.push(format!("        -netdev bridge,id=net0,br={} \\", shell_escape(br)));
-            args.push(format!("        -device {},netdev=net0{} \\", net_device, mac_suffix));
+            args.push(format!(
+                "        -netdev bridge,id=net0,br={} \\",
+                shell_escape(br)
+            ));
+            args.push(format!(
+                "        -device {},netdev=net0{} \\",
+                net_device, mac_suffix
+            ));
         }
         _ => {
             // User/SLIRP
@@ -1230,11 +1347,17 @@ fn generate_network_args(
                     PortProtocol::Tcp => "tcp",
                     PortProtocol::Udp => "udp",
                 };
-                netdev.push_str(&format!(",hostfwd={}::{}-:{}", proto, pf.host_port, pf.guest_port));
+                netdev.push_str(&format!(
+                    ",hostfwd={}::{}-:{}",
+                    proto, pf.host_port, pf.guest_port
+                ));
             }
             netdev.push_str(" \\");
             args.push(netdev);
-            args.push(format!("        -device {},netdev=net0{} \\", net_device, mac_suffix));
+            args.push(format!(
+                "        -device {},netdev=net0{} \\",
+                net_device, mac_suffix
+            ));
         }
     }
 

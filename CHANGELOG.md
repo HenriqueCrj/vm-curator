@@ -1,5 +1,16 @@
 # Changelog
 
+**v1.0.0**
+- **First stable release.** Many thanks to [@indyfive11](https://github.com/indyfive11) for the library-API contributions below! Beyond those, this release focuses on release-engineering and code-hardening rather than new end-user features; existing TUI behavior is unchanged.
+- **Library target for GUI/external consumers** (thanks @indyfive11, #39): adds a `[lib]` target exposing the business-logic modules (`commands`, `config`, `fs`, `hardware`, `metadata`, `vm`, `wizard_types`) via `lib.rs`, with the `ui` (ratatui/crossterm) module intentionally excluded. Wizard/import state types were extracted into a front-end-agnostic `wizard_types` module. Also adds QMP-based VM control (pause/resume) and a D-Bus display launch path for GUI embedding.
+- **Detect immediate QEMU startup failures in D-Bus launch** (thanks @indyfive11, #40): `launch_vm_dbus` now polls `try_wait()` after 300ms (the same pattern as `launch_vm_with_error_check`) so a QEMU process that exits instantly — no session bus, an unrecognized flag, a missing shared library — surfaces an error with QEMU's stderr instead of returning a PID a GUI consumer would wait on forever.
+- **CI quality gates** (`.github/workflows/ci.yml`): every push to `main` and every pull request now runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test --locked`, and `cargo audit`. Previously nothing ran tests or lints before a release tag was cut.
+- **Toolchain pin**: added `rust-toolchain.toml` (stable + clippy/rustfmt) so local, contributor, and CI builds agree; dropped the unenforced "Rust 1.70+" MSRV claim from the README.
+- **Lint clean-up**: added `#![warn(clippy::all)]` and fixed all clippy findings under `-D warnings`; the whole codebase is now `cargo fmt`-clean.
+- **Expanded test coverage**: new tests for `qemu-img` disk-format JSON parsing and for `Config` load/save (round-trip, partial/malformed TOML), via new path-parameterized `Config::load_from`/`save_to` helpers.
+- **Import parser refactor**: the ~360-line libvirt XML parser was split into a small state struct with focused per-event/element helpers; behavior-preserving, with added regression tests.
+- **Documentation**: crate-level public-API docs on the library root, module docs for the app state machine and UI dispatcher, and clarifying comments on intentional future-API `dead_code`; `cargo doc` is warning-free.
+
 **v0.4.10**
 - **First release with external contributions** — many thanks to [@Ibn-Hesham](https://github.com/Ibn-Hesham) and [@nextzard](https://github.com/nextzard) for the patches below!
 - **Nix Flake** (thanks @Ibn-Hesham, #32): Reproducible builds and dev shell. Adds `flake.nix` with `packages.default`, `devShells.default`, and `apps.default` outputs, plus a `flake.lock`. README updated with Nix/NixOS installation instructions. Build artifacts excluded via `.gitignore`.
