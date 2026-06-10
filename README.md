@@ -4,6 +4,11 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 ### Changelog
 
+**v1.1.0**
+- **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now get bidirectional host ⇄ guest copy/paste out of the box — vm-curator now emits the SPICE guest-agent channel that `spice-vdagent` needs (requires `spice-vdagent` installed in the guest)
+- **Fix `-qmp` Crash in Single-GPU Passthrough** (#48): Single-GPU passthrough VMs no longer fail to launch with `-qmp -device: '-device' is not a valid char driver`; the QMP socket value was being dropped when appending passthrough args, leaving `-qmp` dangling
+- **Fix Stray AppImage Release Asset** (#46): Release uploads now publish only `vm-curator-*.AppImage` instead of also shipping the bundled `appimagetool` AppImage
+
 **v1.0.0**
 - **First stable release** — many thanks to [@indyfive11](https://github.com/indyfive11) for the library-API contributions below! Otherwise this release focuses on release-engineering and code-hardening; existing TUI behavior is unchanged.
 - **Library target for GUI consumers** (thanks @indyfive11, #39): new `[lib]` target re-exporting the business-logic modules (`commands`, `config`, `fs`, `hardware`, `metadata`, `vm`, `wizard_types`) for external front-ends, plus QMP VM control (pause/resume) and a D-Bus display launch path

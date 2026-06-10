@@ -1,5 +1,16 @@
 # Changelog
 
+**v1.1.0**
+- **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now support bidirectional host ⇄ guest copy/paste out of the box. vm-curator emitted `-display spice-app` but never the SPICE guest-agent channel that `spice-vdagent` talks over, so clipboard sharing silently did nothing even with the agent installed in the guest.
+  - New VMs automatically emit the guest-agent channel (`-device virtio-serial-pci`, `-chardev spicevmc,id=spicechannel0,name=vdagent`, `-device virtserialport,...com.redhat.spice.0`) — the same args virt-manager adds by default
+  - `SPICE_AGENT_ARGS` is the single source of truth; a new `set_spice_agent_args()` adds/removes the channel when toggling display backends on existing VMs
+  - Requires `spice-vdagent` installed in the guest
+- **Fix `-qmp` Crash in Single-GPU Passthrough** (#48): Single-GPU passthrough VMs created on v1.0.0 failed to launch with `-qmp -device: '-device' is not a valid char driver` after binding the GPU to `vfio-pci`, then dropped back to the desktop.
+  - `extract_qemu_command_for_passthrough()` appended passthrough args by splitting at the command's last backslash and discarding the remainder. Since v1.0.0 appends the QMP socket as the final argument with its value on its own continuation line, this dropped the socket value and left `-qmp` dangling in front of `-device vfio-pci`
+  - The same flawed logic also silently dropped the final argument (e.g. the network device) of any passthrough command
+  - Replaced with `append_passthrough_args()`, which strips only a trailing continuation backslash and appends after the complete command, preserving the QMP value; added regression tests
+- **Fix Stray AppImage Release Asset** (#46): The `build-appimage` CI job globbed `*.AppImage` when uploading, publishing the downloaded `appimagetool-x86_64.AppImage` alongside the real artifact. Scoped the upload glob to `vm-curator-*.AppImage` so only our AppImage ships.
+
 **v1.0.0**
 - **First stable release.** Many thanks to [@indyfive11](https://github.com/indyfive11) for the library-API contributions below! Beyond those, this release focuses on release-engineering and code-hardening rather than new end-user features; existing TUI behavior is unchanged.
 - **Library target for GUI/external consumers** (thanks @indyfive11, #39): adds a `[lib]` target exposing the business-logic modules (`commands`, `config`, `fs`, `hardware`, `metadata`, `vm`, `wizard_types`) via `lib.rs`, with the `ui` (ratatui/crossterm) module intentionally excluded. Wizard/import state types were extracted into a front-end-agnostic `wizard_types` module. Also adds QMP-based VM control (pause/resume) and a D-Bus display launch path for GUI embedding.
