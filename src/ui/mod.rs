@@ -1548,73 +1548,11 @@ fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.selected_menu_item -= 1;
             }
         }
-        KeyCode::Char(' ') | KeyCode::Enter => {
+        KeyCode::Char(' ') => {
             app.toggle_usb_device(app.selected_menu_item);
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            // Save USB passthrough configuration to launch.sh
-            let save_result = if let Some(vm) = app.selected_vm() {
-                let devices: Vec<crate::vm::UsbPassthrough> = app
-                    .selected_usb_devices
-                    .iter()
-                    .filter_map(|&i| app.usb_devices.get(i))
-                    .map(|d| crate::vm::UsbPassthrough {
-                        vendor_id: d.vendor_id,
-                        product_id: d.product_id,
-                        usb_version: d.usb_version,
-                    })
-                    .collect();
-
-                let result = crate::vm::save_usb_passthrough(vm, &devices);
-                Some((result, devices.len()))
-            } else {
-                None
-            };
-
-            if let Some((result, count)) = save_result {
-                match result {
-                    Ok(()) => {
-                        // Reload the script so changes are visible in raw script viewer
-                        app.reload_selected_vm_script();
-
-                        let mut status_msg = if count > 0 {
-                            format!("Saved {} USB device(s) to launch.sh", count)
-                        } else {
-                            "Cleared USB passthrough from launch.sh".to_string()
-                        };
-
-                        // Regenerate single-GPU scripts if they exist
-                        // USB devices are important for single-GPU since there's no graphical session
-                        if let Some(vm) = app.selected_vm() {
-                            if crate::hardware::scripts_exist(&vm.path) {
-                                // Try with in-memory config first, fall back to saved config
-                                let regen_result = if let Some(config) =
-                                    app.single_gpu_config.as_ref()
-                                {
-                                    crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
-                                } else {
-                                    crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
-                                };
-
-                                match regen_result {
-                                    Ok(true) => {
-                                        status_msg.push_str("; single-GPU scripts regenerated");
-                                    }
-                                    Ok(false) => {} // Scripts don't exist, nothing to regenerate
-                                    Err(e) => {
-                                        status_msg.push_str(&format!("; warning: failed to regenerate single-GPU scripts: {}", e));
-                                    }
-                                }
-                            }
-                        }
-
-                        app.set_status(status_msg);
-                    }
-                    Err(e) => {
-                        app.set_status(format!("Error saving USB config: {}", e));
-                    }
-                }
-            }
+            save_usb_devices(app);
         }
         KeyCode::Char('u') | KeyCode::Char('U') => {
             // Install udev rules for selected USB devices
@@ -1652,6 +1590,68 @@ fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn save_usb_devices(app: &mut App) {
+    let save_result = if let Some(vm) = app.selected_vm() {
+        let devices: Vec<crate::vm::UsbPassthrough> = app
+            .selected_usb_devices
+            .iter()
+            .filter_map(|&i| app.usb_devices.get(i))
+            .map(|d| crate::vm::UsbPassthrough {
+                vendor_id: d.vendor_id,
+                product_id: d.product_id,
+                usb_version: d.usb_version,
+            })
+            .collect();
+
+        let result = crate::vm::save_usb_passthrough(vm, &devices);
+        Some((result, devices.len()))
+    } else {
+        None
+    };
+
+    if let Some((result, count)) = save_result {
+        match result {
+            Ok(()) => {
+                app.reload_selected_vm_script();
+
+                let mut status_msg = if count > 0 {
+                    format!("Saved {} USB device(s) to launch.sh", count)
+                } else {
+                    "Cleared USB passthrough from launch.sh".to_string()
+                };
+
+                // Regenerate single-GPU scripts if they exist. USB devices are
+                // important there because the guest may not have a graphical session.
+                if let Some(vm) = app.selected_vm() {
+                    let regen_result = if let Some(config) = app.single_gpu_config.as_ref() {
+                        crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
+                    } else {
+                        crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
+                    };
+
+                    match regen_result {
+                        Ok(true) => {
+                            status_msg.push_str("; single-GPU scripts regenerated");
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            status_msg.push_str(&format!(
+                                "; warning: failed to regenerate single-GPU scripts: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
+
+                app.set_status(status_msg);
+            }
+            Err(e) => {
+                app.set_status(format!("Error saving USB config: {}", e));
+            }
+        }
+    }
 }
 
 fn handle_confirm(app: &mut App, action: ConfirmAction, key: KeyEvent) -> Result<()> {
