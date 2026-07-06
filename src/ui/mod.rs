@@ -18,7 +18,9 @@ use regex::Regex;
 use std::io::Stdout;
 use std::time::{Duration, Instant};
 
-use crate::app::{App, BackgroundResult, ConfirmAction, InputMode, Screen, TextInputContext};
+use crate::app::{
+    App, BackgroundResult, ConfirmAction, InputMode, Screen, TextInputContext, UnsavedKind,
+};
 use crate::vm::{launch_vm_with_error_check, BootMode};
 use std::thread;
 
@@ -146,6 +148,14 @@ fn handle_confirm_click(
     click_x: u16,
     click_y: u16,
 ) -> Result<()> {
+    // The three-way unsaved-changes prompt has three buttons that don't map
+    // onto this two-region click model; require the keyboard (s/d/Esc) and treat
+    // any click as a cancel so a stray click never saves or discards.
+    if matches!(action, ConfirmAction::UnsavedChanges(_)) {
+        app.pop_screen();
+        return Ok(());
+    }
+
     if let Ok((term_width, term_height)) = crossterm::terminal::size() {
         let area = Rect::new(0, 0, term_width, term_height);
 
@@ -344,6 +354,10 @@ fn execute_confirm_action(app: &mut App, action: ConfirmAction) -> Result<()> {
                     }
                 }
             }
+        }
+        ConfirmAction::UnsavedChanges(kind) => {
+            // Primary action (Enter/click) is Save-and-exit.
+            confirm_save_and_exit(app, kind);
         }
     }
     Ok(())
@@ -704,17 +718,20 @@ fn handle_management(app: &mut App, key: KeyEvent) -> Result<()> {
                                     }
                                 }
                             }
+                            app.snapshot_usb_baseline();
                             app.selected_menu_item = 0;
                             app.push_screen(Screen::UsbDevices);
                         }
                         MenuAction::PciPassthrough => {
                             app.load_pci_devices()?;
                             app.restore_pci_selections();
+                            app.snapshot_pci_baseline();
                             app.selected_menu_item = 0;
                             app.push_screen(Screen::PciPassthrough);
                         }
                         MenuAction::SharedFolders => {
                             app.load_shared_folders();
+                            app.snapshot_shared_folders_baseline();
                             app.selected_menu_item = 0;
                             app.push_screen(Screen::SharedFolders);
                         }
@@ -1533,11 +1550,87 @@ fn update_vm_display(script_path: &std::path::Path, new_display: &str) -> Result
     Ok(())
 }
 
+/// Persist the current USB device selection to the VM's launch.sh, then set a
+/// status message. Shared by the `s` key and the unsaved-changes prompt.
+fn save_usb_passthrough_config(app: &mut App) {
+    let save_result = if let Some(vm) = app.selected_vm() {
+        let devices: Vec<crate::vm::UsbPassthrough> = app
+            .selected_usb_devices
+            .iter()
+            .filter_map(|&i| app.usb_devices.get(i))
+            .map(|d| crate::vm::UsbPassthrough {
+                vendor_id: d.vendor_id,
+                product_id: d.product_id,
+                usb_version: d.usb_version,
+            })
+            .collect();
+
+        let result = crate::vm::save_usb_passthrough(vm, &devices);
+        Some((result, devices.len()))
+    } else {
+        None
+    };
+
+    if let Some((result, count)) = save_result {
+        match result {
+            Ok(()) => {
+                // Reload the script so changes are visible in raw script viewer
+                app.reload_selected_vm_script();
+
+                let mut status_msg = if count > 0 {
+                    format!("Saved {} USB device(s) to launch.sh", count)
+                } else {
+                    "Cleared USB passthrough from launch.sh".to_string()
+                };
+
+                // Regenerate single-GPU scripts if they exist
+                // USB devices are important for single-GPU since there's no graphical session
+                if let Some(vm) = app.selected_vm() {
+                    if crate::hardware::scripts_exist(&vm.path) {
+                        // Try with in-memory config first, fall back to saved config
+                        let regen_result = if let Some(config) = app.single_gpu_config.as_ref() {
+                            crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
+                        } else {
+                            crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
+                        };
+
+                        match regen_result {
+                            Ok(true) => {
+                                status_msg.push_str("; single-GPU scripts regenerated");
+                            }
+                            Ok(false) => {} // Scripts don't exist, nothing to regenerate
+                            Err(e) => {
+                                status_msg.push_str(&format!(
+                                    "; warning: failed to regenerate single-GPU scripts: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                app.set_status(status_msg);
+                // Saved state is now the baseline; no unsaved changes remain.
+                app.snapshot_usb_baseline();
+            }
+            Err(e) => {
+                app.set_status(format!("Error saving USB config: {}", e));
+            }
+        }
+    }
+}
+
 fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc => {
-            app.selected_menu_item = 2; // Reset to USB Passthrough position in management menu
-            app.pop_screen();
+            if app.usb_selection_dirty() {
+                app.push_screen(Screen::Confirm(ConfirmAction::UnsavedChanges(
+                    UnsavedKind::Usb,
+                )));
+            } else {
+                app.selected_menu_item = 2; // Reset to USB Passthrough position in management menu
+                app.pop_screen();
+            }
         }
         KeyCode::Char('j') | KeyCode::Down => {
             app.selected_menu_item =
@@ -1552,69 +1645,7 @@ fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
             app.toggle_usb_device(app.selected_menu_item);
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            // Save USB passthrough configuration to launch.sh
-            let save_result = if let Some(vm) = app.selected_vm() {
-                let devices: Vec<crate::vm::UsbPassthrough> = app
-                    .selected_usb_devices
-                    .iter()
-                    .filter_map(|&i| app.usb_devices.get(i))
-                    .map(|d| crate::vm::UsbPassthrough {
-                        vendor_id: d.vendor_id,
-                        product_id: d.product_id,
-                        usb_version: d.usb_version,
-                    })
-                    .collect();
-
-                let result = crate::vm::save_usb_passthrough(vm, &devices);
-                Some((result, devices.len()))
-            } else {
-                None
-            };
-
-            if let Some((result, count)) = save_result {
-                match result {
-                    Ok(()) => {
-                        // Reload the script so changes are visible in raw script viewer
-                        app.reload_selected_vm_script();
-
-                        let mut status_msg = if count > 0 {
-                            format!("Saved {} USB device(s) to launch.sh", count)
-                        } else {
-                            "Cleared USB passthrough from launch.sh".to_string()
-                        };
-
-                        // Regenerate single-GPU scripts if they exist
-                        // USB devices are important for single-GPU since there's no graphical session
-                        if let Some(vm) = app.selected_vm() {
-                            if crate::hardware::scripts_exist(&vm.path) {
-                                // Try with in-memory config first, fall back to saved config
-                                let regen_result = if let Some(config) =
-                                    app.single_gpu_config.as_ref()
-                                {
-                                    crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
-                                } else {
-                                    crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
-                                };
-
-                                match regen_result {
-                                    Ok(true) => {
-                                        status_msg.push_str("; single-GPU scripts regenerated");
-                                    }
-                                    Ok(false) => {} // Scripts don't exist, nothing to regenerate
-                                    Err(e) => {
-                                        status_msg.push_str(&format!("; warning: failed to regenerate single-GPU scripts: {}", e));
-                                    }
-                                }
-                            }
-                        }
-
-                        app.set_status(status_msg);
-                    }
-                    Err(e) => {
-                        app.set_status(format!("Error saving USB config: {}", e));
-                    }
-                }
-            }
+            save_usb_passthrough_config(app);
         }
         KeyCode::Char('u') | KeyCode::Char('U') => {
             // Install udev rules for selected USB devices
@@ -1655,6 +1686,24 @@ fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_confirm(app: &mut App, action: ConfirmAction, key: KeyEvent) -> Result<()> {
+    // Three-way unsaved-changes prompt: Save / Discard / Cancel.
+    if let ConfirmAction::UnsavedChanges(kind) = action {
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
+                confirm_save_and_exit(app, kind);
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                app.pop_screen(); // close the confirm dialog
+                exit_management_screen(app, kind); // discard and leave the screen
+            }
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => {
+                app.pop_screen(); // cancel: close dialog, stay on the screen
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => app.pop_screen(),
         KeyCode::Char('y') | KeyCode::Enter => {
@@ -1663,6 +1712,28 @@ fn handle_confirm(app: &mut App, action: ConfirmAction, key: KeyEvent) -> Result
         _ => {}
     }
     Ok(())
+}
+
+/// Save the pending selection for `kind`, then leave the management screen.
+fn confirm_save_and_exit(app: &mut App, kind: UnsavedKind) {
+    match kind {
+        UnsavedKind::Usb => save_usb_passthrough_config(app),
+        UnsavedKind::Pci => screens::pci_passthrough::save_selection_and_report(app),
+        UnsavedKind::SharedFolders => screens::shared_folders::save_selection_and_report(app),
+    }
+    app.pop_screen(); // close the confirm dialog
+    exit_management_screen(app, kind);
+}
+
+/// Pop a management screen, restoring the parent menu cursor the same way each
+/// screen's own Esc handler does.
+fn exit_management_screen(app: &mut App, kind: UnsavedKind) {
+    match kind {
+        UnsavedKind::Usb => app.selected_menu_item = 2,
+        UnsavedKind::Pci => app.selected_menu_item = 0,
+        UnsavedKind::SharedFolders => {}
+    }
+    app.pop_screen();
 }
 
 fn handle_help(app: &mut App, _key: KeyEvent) -> Result<()> {
@@ -1774,6 +1845,20 @@ fn render_confirm(app: &App, action: &ConfirmAction, frame: &mut Frame) {
                 "Force Stop VM",
                 format!("Force stop {}? This may cause data loss.", name),
             )
+        }
+        ConfirmAction::UnsavedChanges(kind) => {
+            let what = match kind {
+                UnsavedKind::Usb => "USB passthrough",
+                UnsavedKind::Pci => "PCI passthrough",
+                UnsavedKind::SharedFolders => "shared folder",
+            };
+            let message = format!("You have unsaved {} changes.", what);
+            let mut dialog = ConfirmDialog::new("Unsaved Changes", &message);
+            dialog.confirm_label = "Save (s)";
+            dialog.extra_label = Some("Discard (d)");
+            dialog.cancel_label = "Cancel (Esc)";
+            dialog.render(frame.area(), frame.buffer_mut());
+            return;
         }
     };
 

@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::App;
+use crate::app::{App, ConfirmAction, Screen, UnsavedKind};
 use crate::hardware::PciDevice;
 
 /// Render the PCI passthrough screen
@@ -534,8 +534,14 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
 
     match key.code {
         KeyCode::Esc => {
-            app.selected_menu_item = 0; // Reset for management menu
-            app.pop_screen();
+            if app.pci_selection_dirty() {
+                app.push_screen(Screen::Confirm(ConfirmAction::UnsavedChanges(
+                    UnsavedKind::Pci,
+                )));
+            } else {
+                app.selected_menu_item = 0; // Reset for management menu
+                app.pop_screen();
+            }
         }
         KeyCode::Char('j') | KeyCode::Down => {
             // Find current position in relevant devices
@@ -574,50 +580,7 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
             }
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            // Save PCI passthrough configuration
-            let save_result = save_pci_passthrough(app);
-            match save_result {
-                Ok(count) => {
-                    let mut status_msg = if count > 0 {
-                        format!("Saved {} PCI device(s) to launch.sh (will use pkexec/sudo for VFIO binding)", count)
-                    } else {
-                        "Cleared PCI passthrough from launch.sh".to_string()
-                    };
-                    // Reload script
-                    app.reload_selected_vm_script();
-
-                    // Regenerate single-GPU scripts if they exist
-                    if let Some(vm) = app.selected_vm() {
-                        if crate::hardware::scripts_exist(&vm.path) {
-                            // Try with in-memory config first, fall back to saved config
-                            let regen_result = if let Some(config) = app.single_gpu_config.as_ref()
-                            {
-                                crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
-                            } else {
-                                crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
-                            };
-
-                            match regen_result {
-                                Ok(true) => {
-                                    status_msg.push_str("; single-GPU scripts regenerated");
-                                }
-                                Ok(false) => {} // Scripts don't exist, nothing to regenerate
-                                Err(e) => {
-                                    status_msg.push_str(&format!(
-                                        "; warning: failed to regenerate single-GPU scripts: {}",
-                                        e
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    app.set_status(status_msg);
-                }
-                Err(e) => {
-                    app.set_status(format!("Error saving PCI config: {}", e));
-                }
-            }
+            save_selection_and_report(app);
         }
         KeyCode::Char('p') | KeyCode::Char('P') if gpu_enabled => {
             // Refresh and show GPU prerequisites
@@ -630,6 +593,57 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
     }
 
     Ok(())
+}
+
+/// Save the current PCI selection to launch.sh and report the outcome via the
+/// status line. Shared by the `s` key and the unsaved-changes prompt.
+pub(crate) fn save_selection_and_report(app: &mut App) {
+    match save_pci_passthrough(app) {
+        Ok(count) => {
+            let mut status_msg = if count > 0 {
+                format!(
+                    "Saved {} PCI device(s) to launch.sh (will use pkexec/sudo for VFIO binding)",
+                    count
+                )
+            } else {
+                "Cleared PCI passthrough from launch.sh".to_string()
+            };
+            // Reload script
+            app.reload_selected_vm_script();
+
+            // Regenerate single-GPU scripts if they exist
+            if let Some(vm) = app.selected_vm() {
+                if crate::hardware::scripts_exist(&vm.path) {
+                    // Try with in-memory config first, fall back to saved config
+                    let regen_result = if let Some(config) = app.single_gpu_config.as_ref() {
+                        crate::vm::single_gpu_scripts::regenerate_if_exists(vm, config)
+                    } else {
+                        crate::vm::single_gpu_scripts::regenerate_from_saved_config(vm)
+                    };
+
+                    match regen_result {
+                        Ok(true) => {
+                            status_msg.push_str("; single-GPU scripts regenerated");
+                        }
+                        Ok(false) => {} // Scripts don't exist, nothing to regenerate
+                        Err(e) => {
+                            status_msg.push_str(&format!(
+                                "; warning: failed to regenerate single-GPU scripts: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
+            }
+
+            app.set_status(status_msg);
+            // Saved state is now the baseline; no unsaved changes remain.
+            app.snapshot_pci_baseline();
+        }
+        Err(e) => {
+            app.set_status(format!("Error saving PCI config: {}", e));
+        }
+    }
 }
 
 /// Save PCI passthrough configuration to the VM's launch.sh
