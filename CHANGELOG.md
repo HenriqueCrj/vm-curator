@@ -1,5 +1,11 @@
 # Changelog
 
+**Unreleased**
+- **Fix Windows 11 TPM 2.0 Detection on Fedora** (#42): Windows 11 VMs created with TPM enabled failed the installer's "PC must support TPM 2.0" check on Fedora 44, because vm-curator selected the 2M `OVMF_CODE.secboot.fd` firmware, which does not expose TPM 2.0 correctly.
+  - OVMF firmware is now chosen as a matched CODE+VARS **pair** (`find_ovmf_firmware`), preferring 4M builds — including Fedora's qcow2-format firmware (`OVMF_CODE_4M.secboot.qcow2`) — over 2M, with the 2M variants kept only as a last-resort fallback. Picking CODE and VARS from one pair guarantees they always agree in size and on-disk format.
+  - The pflash `-drive` lines now emit `format=qcow2` or `format=raw` to match the selected firmware instead of a hardcoded `format=raw`, so qcow2 firmware actually works. Applies to both the standard and single-GPU-passthrough launch scripts.
+  - Generated launch scripts now create a per-user swtpm CA config (`swtpm_setup --create-config-files skip-if-exist`) so EK/platform certificate creation no longer needs write access to the system-wide `/var/lib/swtpm-localca`, and fall back to a certificate-less swtpm setup if cert creation still fails. The single-GPU-passthrough TPM setup was brought to parity (previously missing `--overwrite` and the certificate handling).
+
 **v1.1.0**
 - **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now support bidirectional host ⇄ guest copy/paste out of the box. vm-curator emitted `-display spice-app` but never the SPICE guest-agent channel that `spice-vdagent` talks over, so clipboard sharing silently did nothing even with the agent installed in the guest.
   - New VMs automatically emit the guest-agent channel (`-device virtio-serial-pci`, `-chardev spicevmc,id=spicechannel0,name=vdagent`, `-device virtserialport,...com.redhat.spice.0`) — the same args virt-manager adds by default

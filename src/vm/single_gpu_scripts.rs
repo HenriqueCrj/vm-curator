@@ -638,7 +638,23 @@ init_tpm() {{
     if [[ ! -d "{tpm_dir}" ]]; then
         echo "Initializing TPM state directory..."
         mkdir -p "{tpm_dir}"
-        swtpm_setup --tpmstate "{tpm_dir}" --tpm2 --create-ek-cert --create-platform-cert
+
+        # Ensure a per-user swtpm CA config exists so EK/platform certificate
+        # creation does not require write access to /var/lib/swtpm-localca
+        # (issue #42). skip-if-exist never clobbers an existing user config.
+        if [[ ! -f "$HOME/.config/swtpm-localca.conf" ]]; then
+            swtpm_setup --create-config-files skip-if-exist 2>/dev/null || true
+        fi
+
+        # Try a full setup with certificates; fall back to a certificate-less
+        # setup if cert creation still fails (Windows 11 detects TPM 2.0 without
+        # an EK certificate).
+        if ! swtpm_setup --tpmstate "{tpm_dir}" --tpm2 \
+            --create-ek-cert --create-platform-cert \
+            --allow-signing --decryption --overwrite 2>/dev/null; then
+            echo "swtpm certificate creation failed; retrying without certificates..."
+            swtpm_setup --tpmstate "{tpm_dir}" --tpm2 --overwrite
+        fi
     fi
 }}
 
@@ -1268,13 +1284,20 @@ fn generate_basic_qemu_command(
         );
     }
 
-    // Add UEFI if present
+    // Add UEFI if present. Derive the pflash format from the firmware file
+    // extension so qcow2 OVMF images (e.g. Fedora's 4M firmware) work; the CODE
+    // and VARS files always share a format because they come from one pair.
     if components.has_uefi {
-        cmd.push_str(
+        let ovmf_format = match components.ovmf_code.as_deref() {
+            Some(path) if path.ends_with(".qcow2") => "qcow2",
+            _ => "raw",
+        };
+        cmd.push_str(&format!(
             r#" \
-    -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-    -drive if=pflash,format=raw,file="$OVMF_VARS""#,
-        );
+    -drive if=pflash,format={fmt},readonly=on,file="$OVMF_CODE" \
+    -drive if=pflash,format={fmt},file="$OVMF_VARS""#,
+            fmt = ovmf_format
+        ));
     }
 
     // Add TPM if present
