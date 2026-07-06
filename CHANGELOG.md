@@ -8,7 +8,7 @@
 - **Warn Before Discarding Passthrough / Shared-Folder Changes** (#52): On the USB Passthrough, PCI Passthrough, and Shared Folders management screens, selections are saved with `s` while `Esc` exits — so users who toggled a device and pressed `Esc` (expecting it to persist) silently lost their changes, and the device was never passed through.
   - Leaving any of these three screens with unsaved changes now shows a three-way prompt — **Save (s) / Discard (d) / Cancel (Esc)** — instead of silently discarding. Choosing Save persists to `launch.sh` (so the change applies on next boot) and returns; Discard leaves without saving; Cancel stays on the screen.
   - Unsaved-change detection compares against the selection captured on entry (and refreshed after each save), so a previously saved but now-disconnected USB/PCI device does not register as a spurious change.
-  - The existing `s` key still saves immediately; the toggle/add/remove keys are unchanged.
+  - On the USB and PCI screens, `Space` is now the sole toggle and `Enter` saves (alongside `s`). Previously both `Space` and `Enter` toggled, so selecting a device with `Space` and pressing `Enter` to "confirm" toggled it back off — exactly the reporter's flow.
 
 **v1.1.0**
 - **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now support bidirectional host ⇄ guest copy/paste out of the box. vm-curator emitted `-display spice-app` but never the SPICE guest-agent channel that `spice-vdagent` talks over, so clipboard sharing silently did nothing even with the agent installed in the guest.

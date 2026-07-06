@@ -83,9 +83,9 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     // Help text - show GPU options only when multi-GPU passthrough is enabled (not single GPU)
     let help_text = if app.config.enable_multi_gpu_passthrough && !app.config.single_gpu_enabled {
-        "[Space/Enter] Toggle  [g] Auto-select GPU  [s] Save  [p] Prerequisites  [Esc] Back"
+        "[Space] Toggle  [g] Auto-select GPU  [Enter/s] Save  [p] Prerequisites  [Esc] Back"
     } else {
-        "[Space/Enter] Toggle  [s] Save  [Esc] Back"
+        "[Space] Toggle  [Enter/s] Save  [Esc] Back"
     };
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -568,7 +568,9 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
                 app.selected_menu_item = relevant_indices[0];
             }
         }
-        KeyCode::Char(' ') | KeyCode::Enter => {
+        KeyCode::Char(' ') => {
+            // Space is the sole toggle; Enter saves (see below) so pressing
+            // Enter to "confirm" a selection no longer toggles it back off (#52).
             app.toggle_pci_device(app.selected_menu_item);
         }
         KeyCode::Char('g') | KeyCode::Char('G') if gpu_enabled => {
@@ -579,7 +581,7 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
                 }
             }
         }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
+        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
             save_selection_and_report(app);
         }
         KeyCode::Char('p') | KeyCode::Char('P') if gpu_enabled => {

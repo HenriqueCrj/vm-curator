@@ -1641,10 +1641,12 @@ fn handle_usb_devices(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.selected_menu_item -= 1;
             }
         }
-        KeyCode::Char(' ') | KeyCode::Enter => {
+        KeyCode::Char(' ') => {
+            // Space is the sole toggle; Enter saves (see below) so pressing
+            // Enter to "confirm" a selection no longer toggles it back off (#52).
             app.toggle_usb_device(app.selected_menu_item);
         }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
+        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
             save_usb_passthrough_config(app);
         }
         KeyCode::Char('u') | KeyCode::Char('U') => {
@@ -1958,9 +1960,10 @@ fn render_usb_devices(app: &App, frame: &mut Frame) {
     }
 
     // Help text
-    let help = Paragraph::new("[Space] Toggle  [s] Save  [u] Install USB permissions  [Esc] Back")
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
+    let help =
+        Paragraph::new("[Space] Toggle  [Enter/s] Save  [u] Install USB permissions  [Esc] Back")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
     frame.render_widget(help, help_area);
 }
 
