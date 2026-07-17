@@ -928,7 +928,7 @@ const SHARED_FOLDERS_MARKER_END: &str = "# <<< Shared Folders <<<";
 const SHARED_FOLDERS_ARGS_REF: &str = "\"${SHARED_FOLDERS_ARGS[@]}\"";
 
 /// A shared folder configuration for virtio-9p host-to-guest file sharing
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedFolder {
     pub host_path: String,
     pub mount_tag: String,

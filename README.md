@@ -4,6 +4,13 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 ### Changelog
 
+**v1.2.0**
+- **Fix Windows 11 TPM 2.0 Detection on Fedora** (#42): Windows 11 installs no longer fail the "PC must support TPM 2.0" check on Fedora — OVMF firmware is now selected as a matched CODE+VARS pair, preferring 4M builds (including qcow2-format firmware), with the pflash `format=` emitted to match
+- **GPU vBIOS ROM support for Single-GPU Passthrough** (#44): Point the Single GPU Setup screen at a vBIOS ROM (`[r]` to set, `[R]` to clear) so the GPU is passed with `romfile=…` — commonly needed for AMD cards that otherwise output no video after the host POSTs them
+- **Fix Single-GPU Passthrough Script Bugs on AMD + NVIDIA** (#58): The generated script no longer tries to bind infrastructure devices (e.g. the host bridge sharing the GPU's IOMMU group) to `vfio-pci`, and now strips emulated graphics devices (`virtio-vga-gl`, `qxl`, etc.) that made QEMU abort under `-vga none`
+- **Warn Before Discarding Passthrough / Shared-Folder Changes** (#52): Leaving the USB Passthrough, PCI Passthrough, or Shared Folders screens with unsaved changes now prompts **Save / Discard / Cancel** instead of silently dropping them; `Space` toggles and `Enter`/`s` saves
+- **Security: bump `quick-xml` to 0.41** (RUSTSEC-2026-0194/0195): resolves two high-severity advisories in the libvirt-XML import parser; also bumps `anyhow` to 1.0.103
+
 **v1.1.0**
 - **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now get bidirectional host ⇄ guest copy/paste out of the box — vm-curator now emits the SPICE guest-agent channel that `spice-vdagent` needs (requires `spice-vdagent` installed in the guest)
 - **Fix `-qmp` Crash in Single-GPU Passthrough** (#48): Single-GPU passthrough VMs no longer fail to launch with `-qmp -device: '-device' is not a valid char driver`; the QMP socket value was being dropped when appending passthrough args, leaving `-qmp` dangling
