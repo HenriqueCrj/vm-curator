@@ -57,7 +57,7 @@ fn resize_target(
         }
         None => return Err("No virtual system disk found"),
     };
-    if virtual_disks.next().is_some() {
+    if virtual_disks.any(|candidate| candidate.path != disk.path) {
         return Err("Multiple virtual system disks found; resize is unavailable until a disk can be selected explicitly");
     }
     Ok(ResizeTarget {
@@ -2873,6 +2873,22 @@ mod tests {
         assert_eq!(
             resize_target(Some(&vm), false),
             Err("Multiple virtual system disks found; resize is unavailable until a disk can be selected explicitly")
+        );
+    }
+
+    #[test]
+    fn resize_target_deduplicates_repeated_references_to_the_same_disk() {
+        let vm = vm_with_disks(vec![
+            disk("primary.raw", DiskRole::System),
+            disk("primary.raw", DiskRole::System),
+        ]);
+
+        assert_eq!(
+            resize_target(Some(&vm), false).unwrap(),
+            ResizeTarget {
+                vm_id: "test-vm".to_string(),
+                disk_path: PathBuf::from("primary.raw"),
+            }
         );
     }
 
