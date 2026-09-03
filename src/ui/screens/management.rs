@@ -125,7 +125,7 @@ pub fn get_menu_items(vm: &DiscoveredVm, config: &Config) -> Vec<MenuItem> {
         },
         MenuItem {
             name: "Resize Storage",
-            description: "Increase the primary virtual disk capacity",
+            description: "Increase a virtual disk capacity",
             action: MenuAction::ResizeStorage,
         },
     ]);
@@ -645,10 +645,7 @@ mod tests {
             .expect("resize storage menu item");
 
         assert_eq!(resize.name, "Resize Storage");
-        assert_eq!(
-            resize.description,
-            "Increase the primary virtual disk capacity"
-        );
+        assert_eq!(resize.description, "Increase a virtual disk capacity");
     }
 
     #[test]
