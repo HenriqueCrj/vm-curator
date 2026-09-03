@@ -305,6 +305,16 @@ mod tests {
     }
 
     #[test]
+    fn resize_rejects_zero_without_running_qemu_img() {
+        let runner = FakeQemuImgRunner::default();
+
+        let error = resize_disk_with_runner(Path::new("disk.raw"), 0, &runner).unwrap_err();
+
+        assert_eq!(error.to_string(), "Disk size must be greater than zero");
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
     fn resize_rejects_dev_paths_without_running_qemu_img() {
         let error = resize_disk(Path::new("/dev/example-disk"), 2).unwrap_err();
         assert!(error.to_string().contains("Physical disks"));
@@ -325,6 +335,43 @@ mod tests {
                 vec!["info", "--output=json", "/vms/example/disk.raw"],
                 vec!["resize", "-f", "raw", "/vms/example/disk.raw", "2G"],
             ]
+        );
+    }
+
+    #[test]
+    fn resize_rejects_non_growth_before_resize_command() {
+        for requested_size in [1, 2] {
+            let runner = FakeQemuImgRunner::with_responses(vec![FakeQemuImgRunner::success(
+                r#"{"format":"raw","virtual-size":2147483648}"#,
+            )]);
+
+            let error = resize_disk_with_runner(
+                Path::new("/vms/example/disk.raw"),
+                requested_size,
+                &runner,
+            )
+            .unwrap_err();
+
+            assert!(error.to_string().contains("New size must be larger"));
+            assert_eq!(
+                *runner.calls.borrow(),
+                vec![vec!["info", "--output=json", "/vms/example/disk.raw"]]
+            );
+        }
+    }
+
+    #[test]
+    fn resize_stops_when_disk_inspection_fails() {
+        let runner =
+            FakeQemuImgRunner::with_responses(vec![FakeQemuImgRunner::failure("image is corrupt")]);
+
+        let error =
+            resize_disk_with_runner(Path::new("/vms/example/disk.raw"), 2, &runner).unwrap_err();
+
+        assert!(error.to_string().contains("image is corrupt"));
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![vec!["info", "--output=json", "/vms/example/disk.raw"]]
         );
     }
 

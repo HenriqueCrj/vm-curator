@@ -2855,6 +2855,12 @@ mod tests {
             resize_target(Some(&physical), true),
             Err("Stop the VM before resizing its disk")
         );
+
+        let firmware_only = vm_with_disks(vec![disk("firmware.img", DiskRole::Firmware)]);
+        assert_eq!(
+            resize_target(Some(&firmware_only), false),
+            Err("No virtual system disk found")
+        );
     }
 
     #[test]
@@ -2922,6 +2928,38 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, "Could not inspect primary disk: unreadable image");
+    }
+
+    #[test]
+    fn prepare_resize_dialog_does_not_inspect_an_invalid_target() {
+        let called = Cell::new(false);
+
+        assert_eq!(
+            prepare_resize_dialog(None, false, |_: &std::path::Path| {
+                called.set(true);
+                Ok(DiskImageInfo {
+                    format: "raw".to_string(),
+                    virtual_size: 8 * 1024 * 1024 * 1024,
+                })
+            })
+            .unwrap_err(),
+            "No VM selected"
+        );
+        assert!(!called.get());
+
+        let vm = vm_with_disks(vec![disk("primary.raw", DiskRole::System)]);
+        assert_eq!(
+            prepare_resize_dialog(Some(&vm), true, |_: &std::path::Path| {
+                called.set(true);
+                Ok(DiskImageInfo {
+                    format: "raw".to_string(),
+                    virtual_size: 8 * 1024 * 1024 * 1024,
+                })
+            })
+            .unwrap_err(),
+            "Stop the VM before resizing its disk"
+        );
+        assert!(!called.get());
     }
 
     #[test]

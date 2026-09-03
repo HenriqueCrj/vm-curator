@@ -658,4 +658,20 @@ mod tests {
         assert_eq!(menu_item_label(9, "Tenth"), "    Tenth");
         assert_eq!(menu_item_label(13, "Fourteenth"), "    Fourteenth");
     }
+
+    #[test]
+    fn storage_resize_does_not_advertise_an_unhandled_shortcut() {
+        let items = get_menu_items(&test_vm(), &Config::default());
+        let (index, resize) = items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| item.action == MenuAction::ResizeStorage)
+            .expect("resize storage menu item");
+
+        assert!(
+            index >= 9,
+            "test requires resize to appear after shortcut 9"
+        );
+        assert_eq!(menu_item_label(index, resize.name), "    Resize Storage");
+    }
 }
