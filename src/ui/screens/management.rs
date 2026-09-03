@@ -609,3 +609,37 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::QemuConfig;
+    use std::path::PathBuf;
+
+    fn test_vm() -> DiscoveredVm {
+        DiscoveredVm {
+            id: "test-vm".to_string(),
+            path: PathBuf::from("/vms/test-vm"),
+            launch_script: PathBuf::from("/vms/test-vm/launch.sh"),
+            config: QemuConfig::default(),
+            custom_name: None,
+            os_profile: None,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn management_menu_exposes_storage_resize() {
+        let items = get_menu_items(&test_vm(), &Config::default());
+        let resize = items
+            .iter()
+            .find(|item| item.action == MenuAction::ResizeStorage)
+            .expect("resize storage menu item");
+
+        assert_eq!(resize.name, "Resize Storage");
+        assert_eq!(
+            resize.description,
+            "Increase the primary virtual disk capacity"
+        );
+    }
+}

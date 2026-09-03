@@ -3,6 +3,7 @@
 //! Provides wrappers around qemu-img for disk creation, inspection, and resizing.
 
 use anyhow::{bail, Context, Result};
+use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::Command;
@@ -14,6 +15,30 @@ const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 pub struct DiskImageInfo {
     pub format: String,
     pub virtual_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QemuImgOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+trait QemuImgRunner {
+    fn run(&self, args: &[String]) -> io::Result<QemuImgOutput>;
+}
+
+struct SystemQemuImgRunner;
+
+impl QemuImgRunner for SystemQemuImgRunner {
+    fn run(&self, args: &[String]) -> io::Result<QemuImgOutput> {
+        let output = Command::new("qemu-img").args(args).output()?;
+        Ok(QemuImgOutput {
+            success: output.status.success(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
 
 /// Convert a path to a string, returning an error if the path contains invalid UTF-8
@@ -68,13 +93,19 @@ pub fn detect_disk_format(path: &Path) -> Option<String> {
 
 /// Inspect a disk image and return its actual format and virtual capacity.
 pub fn disk_image_info(path: &Path) -> Result<DiskImageInfo> {
-    let path_str = path_to_str(path)?;
-    let output = Command::new("qemu-img")
-        .args(["info", "--output=json", path_str])
-        .output()
-        .context("Failed to run qemu-img info")?;
+    disk_image_info_with_runner(path, &SystemQemuImgRunner)
+}
 
-    if !output.status.success() {
+fn disk_image_info_with_runner(path: &Path, runner: &impl QemuImgRunner) -> Result<DiskImageInfo> {
+    let path_str = path_to_str(path)?;
+    let args = vec![
+        "info".to_string(),
+        "--output=json".to_string(),
+        path_str.to_string(),
+    ];
+    let output = runner.run(&args).context("Failed to run qemu-img info")?;
+
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to inspect disk image: {}", stderr.trim());
     }
@@ -87,6 +118,14 @@ pub fn disk_image_info(path: &Path) -> Result<DiskImageInfo> {
 ///
 /// Shrinking is deliberately rejected because it can silently destroy guest data.
 pub fn resize_disk(path: &Path, new_size_gib: u64) -> Result<()> {
+    resize_disk_with_runner(path, new_size_gib, &SystemQemuImgRunner)
+}
+
+fn resize_disk_with_runner(
+    path: &Path,
+    new_size_gib: u64,
+    runner: &impl QemuImgRunner,
+) -> Result<()> {
     let is_block_device = std::fs::metadata(path)
         .map(|metadata| metadata.file_type().is_block_device())
         .unwrap_or(false);
@@ -97,17 +136,21 @@ pub fn resize_disk(path: &Path, new_size_gib: u64) -> Result<()> {
         bail!("Disk size must be greater than zero");
     }
 
-    let info = disk_image_info(path)?;
+    let info = disk_image_info_with_runner(path, runner)?;
     validate_growth(info.virtual_size, new_size_gib)?;
 
     let path_str = path_to_str(path)?;
     let size = format!("{new_size_gib}G");
-    let output = Command::new("qemu-img")
-        .args(["resize", "-f", &info.format, path_str, &size])
-        .output()
-        .context("Failed to run qemu-img resize")?;
+    let args = vec![
+        "resize".to_string(),
+        "-f".to_string(),
+        info.format,
+        path_str.to_string(),
+        size,
+    ];
+    let output = runner.run(&args).context("Failed to run qemu-img resize")?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("Failed to resize disk image: {}", stderr.trim());
     }
@@ -154,7 +197,52 @@ fn parse_disk_info_json(stdout: &str) -> Result<DiskImageInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::path::PathBuf;
+
+    #[derive(Default)]
+    struct FakeQemuImgRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        responses: RefCell<VecDeque<io::Result<QemuImgOutput>>>,
+    }
+
+    impl FakeQemuImgRunner {
+        fn with_responses(responses: Vec<io::Result<QemuImgOutput>>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                responses: RefCell::new(responses.into()),
+            }
+        }
+
+        fn success(stdout: &str) -> io::Result<QemuImgOutput> {
+            Ok(QemuImgOutput {
+                success: true,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn failure(stderr: &str) -> io::Result<QemuImgOutput> {
+            Ok(QemuImgOutput {
+                success: false,
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        }
+    }
+
+    impl QemuImgRunner for FakeQemuImgRunner {
+        fn run(&self, args: &[String]) -> io::Result<QemuImgOutput> {
+            self.calls.borrow_mut().push(args.to_vec());
+            self.responses.borrow_mut().pop_front().unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "fake qemu-img runner has no response",
+                ))
+            })
+        }
+    }
 
     #[test]
     fn parse_format_qcow2() {
@@ -223,11 +311,61 @@ mod tests {
     }
 
     #[test]
-    fn resize_raw_disk_end_to_end() {
-        if Command::new("qemu-img").arg("--version").output().is_err() {
-            return;
-        }
+    fn resize_passes_detected_format_and_absolute_size() {
+        let runner = FakeQemuImgRunner::with_responses(vec![
+            FakeQemuImgRunner::success(r#"{"format":"raw","virtual-size":1073741824}"#),
+            FakeQemuImgRunner::success(""),
+        ]);
 
+        resize_disk_with_runner(Path::new("/vms/example/disk.raw"), 2, &runner).unwrap();
+
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![
+                vec!["info", "--output=json", "/vms/example/disk.raw"],
+                vec!["resize", "-f", "raw", "/vms/example/disk.raw", "2G"],
+            ]
+        );
+    }
+
+    #[test]
+    fn disk_info_reports_command_failure() {
+        let runner =
+            FakeQemuImgRunner::with_responses(vec![FakeQemuImgRunner::failure("image is corrupt")]);
+
+        let error = disk_image_info_with_runner(Path::new("disk.raw"), &runner).unwrap_err();
+
+        assert!(error.to_string().contains("image is corrupt"));
+    }
+
+    #[test]
+    fn resize_reports_command_failure() {
+        let runner = FakeQemuImgRunner::with_responses(vec![
+            FakeQemuImgRunner::success(r#"{"format":"qcow2","virtual-size":1073741824}"#),
+            FakeQemuImgRunner::failure("permission denied"),
+        ]);
+
+        let error = resize_disk_with_runner(Path::new("disk.qcow2"), 2, &runner).unwrap_err();
+
+        assert!(error.to_string().contains("permission denied"));
+        assert_eq!(runner.calls.borrow()[1][2], "qcow2");
+    }
+
+    #[test]
+    fn disk_info_reports_spawn_failure() {
+        let runner = FakeQemuImgRunner::with_responses(vec![Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "qemu-img missing",
+        ))]);
+
+        let error = disk_image_info_with_runner(Path::new("disk.raw"), &runner).unwrap_err();
+
+        assert!(error.to_string().contains("Failed to run qemu-img info"));
+    }
+
+    #[test]
+    #[ignore = "requires the qemu-img executable"]
+    fn resize_raw_disk_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         let disk = dir.path().join("disk.raw");
         create_disk_with_format(&disk, "raw", "1G").unwrap();
