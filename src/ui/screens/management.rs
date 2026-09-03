@@ -171,6 +171,14 @@ pub fn menu_item_count(app: &App) -> usize {
     }
 }
 
+fn menu_item_label(index: usize, name: &str) -> String {
+    if index < 9 {
+        format!("[{}] {}", index + 1, name)
+    } else {
+        format!("    {name}")
+    }
+}
+
 /// Default display options for VMs (used as fallback descriptions)
 const DISPLAY_OPTIONS: &[(&str, &str)] = &[
     ("gtk", "GTK - Default windowed display"),
@@ -274,7 +282,7 @@ pub fn render(app: &App, frame: &mut Frame) {
             };
 
             let content = vec![
-                Line::styled(format!("[{}] {}", i + 1, item.name), style),
+                Line::styled(menu_item_label(i, item.name), style),
                 Line::styled(
                     format!("    {}", item.description),
                     Style::default().fg(Color::DarkGray),
@@ -641,5 +649,13 @@ mod tests {
             resize.description,
             "Increase the primary virtual disk capacity"
         );
+    }
+
+    #[test]
+    fn menu_labels_only_advertise_supported_numeric_shortcuts() {
+        assert_eq!(menu_item_label(0, "First"), "[1] First");
+        assert_eq!(menu_item_label(8, "Ninth"), "[9] Ninth");
+        assert_eq!(menu_item_label(9, "Tenth"), "    Tenth");
+        assert_eq!(menu_item_label(13, "Fourteenth"), "    Fourteenth");
     }
 }

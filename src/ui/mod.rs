@@ -41,12 +41,24 @@ fn resize_target(
         return Err("Stop the VM before resizing its disk");
     }
     let vm = vm.ok_or("No VM selected")?;
-    let disk = vm
+    let mut virtual_disks = vm
         .config
-        .system_disk()
-        .ok_or("No primary virtual disk found")?;
-    if disk.is_physical_device() {
-        return Err("Physical disks cannot be resized here");
+        .disks
+        .iter()
+        .filter(|disk| disk.role == crate::vm::qemu_config::DiskRole::System)
+        .filter(|disk| !disk.is_physical_device());
+    let disk = match virtual_disks.next() {
+        Some(disk) => disk,
+        None if vm.config.disks.iter().any(|disk| {
+            disk.role == crate::vm::qemu_config::DiskRole::System && disk.is_physical_device()
+        }) =>
+        {
+            return Err("Physical disks cannot be resized here");
+        }
+        None => return Err("No virtual system disk found"),
+    };
+    if virtual_disks.next().is_some() {
+        return Err("Multiple virtual system disks found; resize is unavailable until a disk can be selected explicitly");
     }
     Ok(ResizeTarget {
         vm_id: vm.id.clone(),
@@ -85,6 +97,24 @@ fn execute_resize_request(
     resize(&target.disk_path, new_size_gib)
         .map_err(|error| format!("Could not resize disk: {error}"))?;
     Ok(new_size_gib)
+}
+
+fn text_input_contents(context: &TextInputContext, input: &str) -> String {
+    match context {
+        TextInputContext::ResizeVmDisk {
+            disk_path,
+            current_size_bytes,
+            ..
+        } => {
+            const GIB: f64 = (1024 * 1024 * 1024) as f64;
+            format!(
+                "Disk: {}\nCurrent: {:.2} GiB  New total: {input}_ GiB\n\nExpand the partition/filesystem inside the guest afterward.",
+                disk_path.display(),
+                *current_size_bytes as f64 / GIB,
+            )
+        }
+        _ => format!("{input}_"),
+    }
 }
 
 /// Run the TUI application
@@ -2543,7 +2573,7 @@ fn handle_file_browser(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn render_text_input(app: &App, context: &TextInputContext, frame: &mut Frame) {
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
     let title = match context {
         TextInputContext::SnapshotName => " Enter Snapshot Name ",
@@ -2554,7 +2584,7 @@ fn render_text_input(app: &App, context: &TextInputContext, frame: &mut Frame) {
     let area = frame.area();
     let dialog_width = 50.min(area.width.saturating_sub(4));
     let dialog_height = if matches!(context, TextInputContext::ResizeVmDisk { .. }) {
-        7
+        9
     } else {
         5
     };
@@ -2571,20 +2601,9 @@ fn render_text_input(app: &App, context: &TextInputContext, frame: &mut Frame) {
     let inner = block.inner(dialog_area);
     frame.render_widget(block, dialog_area);
 
-    let input_text = match context {
-        TextInputContext::ResizeVmDisk {
-            current_size_bytes, ..
-        } => {
-            const GIB: f64 = (1024 * 1024 * 1024) as f64;
-            format!(
-                "Current: {:.2} GiB  New total: {}_ GiB\n\nExpand the partition/filesystem inside the guest afterward.",
-                *current_size_bytes as f64 / GIB,
-                app.text_input_buffer
-            )
-        }
-        _ => format!("{}_", app.text_input_buffer),
-    };
-    let input = Paragraph::new(input_text).style(Style::default().fg(Color::White));
+    let input = Paragraph::new(text_input_contents(context, &app.text_input_buffer))
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: false });
     frame.render_widget(input, inner);
 }
 
@@ -2801,11 +2820,11 @@ mod tests {
     }
 
     #[test]
-    fn resize_target_selects_first_virtual_system_disk() {
+    fn resize_target_selects_the_only_virtual_system_disk() {
         let vm = vm_with_disks(vec![
             disk("firmware.img", DiskRole::Firmware),
+            disk("/dev/sdb", DiskRole::System),
             disk("primary.raw", DiskRole::System),
-            disk("secondary.raw", DiskRole::System),
         ]);
 
         assert_eq!(
@@ -2824,7 +2843,7 @@ mod tests {
         let no_disk = vm_with_disks(Vec::new());
         assert_eq!(
             resize_target(Some(&no_disk), false),
-            Err("No primary virtual disk found")
+            Err("No virtual system disk found")
         );
 
         let physical = vm_with_disks(vec![disk("/dev/sdb", DiskRole::System)]);
@@ -2835,6 +2854,33 @@ mod tests {
         assert_eq!(
             resize_target(Some(&physical), true),
             Err("Stop the VM before resizing its disk")
+        );
+    }
+
+    #[test]
+    fn resize_target_rejects_ambiguous_virtual_disks() {
+        let vm = vm_with_disks(vec![
+            disk("data.raw", DiskRole::System),
+            disk("os.raw", DiskRole::System),
+        ]);
+
+        assert_eq!(
+            resize_target(Some(&vm), false),
+            Err("Multiple virtual system disks found; resize is unavailable until a disk can be selected explicitly")
+        );
+    }
+
+    #[test]
+    fn resize_dialog_identifies_the_exact_disk() {
+        let context = TextInputContext::ResizeVmDisk {
+            vm_id: "test-vm".to_string(),
+            disk_path: PathBuf::from("/vms/test-vm/os.raw"),
+            current_size_bytes: 8 * 1024 * 1024 * 1024,
+        };
+
+        assert_eq!(
+            text_input_contents(&context, "16"),
+            "Disk: /vms/test-vm/os.raw\nCurrent: 8.00 GiB  New total: 16_ GiB\n\nExpand the partition/filesystem inside the guest afterward."
         );
     }
 
