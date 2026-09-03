@@ -315,6 +315,11 @@ impl Default for QemuConfig {
 }
 
 impl QemuConfig {
+    /// Get the first system disk in launch order.
+    pub fn system_disk(&self) -> Option<&DiskConfig> {
+        self.disks.iter().find(|d| d.role == DiskRole::System)
+    }
+
     /// Check if this VM supports snapshots (qcow2 system disks).
     /// Firmware (pflash/OVMF) and media drives are excluded: on distros that
     /// ship qcow2 OVMF images the firmware must never count as snapshotable.
@@ -330,7 +335,7 @@ impl QemuConfig {
         self.disks
             .iter()
             .find(|d| d.role == DiskRole::System && d.format.supports_snapshots())
-            .or_else(|| self.disks.iter().find(|d| d.role == DiskRole::System))
+            .or_else(|| self.system_disk())
     }
 
     /// Whether para-virtualized 3D acceleration is currently enabled.
@@ -379,5 +384,34 @@ mod tests {
             ..Default::default()
         };
         assert!(!cfg.has_gl_acceleration());
+    }
+
+    #[test]
+    fn system_disk_uses_launch_order_instead_of_format_preference() {
+        let raw = DiskConfig {
+            path: PathBuf::from("primary.raw"),
+            format: DiskFormat::Raw,
+            interface: "virtio".to_string(),
+            role: DiskRole::System,
+        };
+        let qcow2 = DiskConfig {
+            path: PathBuf::from("secondary.qcow2"),
+            format: DiskFormat::Qcow2,
+            interface: "virtio".to_string(),
+            role: DiskRole::System,
+        };
+        let cfg = QemuConfig {
+            disks: vec![raw, qcow2],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            cfg.system_disk().unwrap().path,
+            PathBuf::from("primary.raw")
+        );
+        assert_eq!(
+            cfg.primary_disk().unwrap().path,
+            PathBuf::from("secondary.qcow2")
+        );
     }
 }

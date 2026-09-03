@@ -101,6 +101,7 @@ pub enum Screen {
 pub enum TextInputContext {
     SnapshotName,
     RenameVm,
+    ResizeVmDisk { current_size_bytes: u64 },
 }
 
 /// Actions that need confirmation

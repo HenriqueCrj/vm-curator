@@ -32,6 +32,7 @@ pub enum MenuAction {
     Toggle3dAccel,
     EditNotes,
     RenameVm,
+    ResizeStorage,
     ResetVm,
     DeleteVm,
     EditRawConfig,
@@ -121,6 +122,11 @@ pub fn get_menu_items(vm: &DiscoveredVm, config: &Config) -> Vec<MenuItem> {
             name: "Rename VM",
             description: "Change the VM's display name",
             action: MenuAction::RenameVm,
+        },
+        MenuItem {
+            name: "Resize Storage",
+            description: "Increase the primary virtual disk capacity",
+            action: MenuAction::ResizeStorage,
         },
     ]);
 

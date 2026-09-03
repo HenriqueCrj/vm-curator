@@ -874,6 +874,35 @@ fn handle_management(app: &mut App, key: KeyEvent) -> Result<()> {
                             }
                             app.push_screen(Screen::TextInput(TextInputContext::RenameVm));
                         }
+                        MenuAction::ResizeStorage => {
+                            if app.selected_vm_pid().is_some() {
+                                app.set_status("Stop the VM before resizing its disk");
+                            } else if let Some(disk) = app
+                                .selected_vm()
+                                .and_then(|vm| vm.config.system_disk())
+                                .cloned()
+                            {
+                                if disk.is_physical_device() {
+                                    app.set_status("Physical disks cannot be resized here");
+                                } else {
+                                    match crate::commands::qemu_img::disk_image_info(&disk.path) {
+                                        Ok(info) => {
+                                            app.text_input_buffer.clear();
+                                            app.push_screen(Screen::TextInput(
+                                                TextInputContext::ResizeVmDisk {
+                                                    current_size_bytes: info.virtual_size,
+                                                },
+                                            ));
+                                        }
+                                        Err(e) => app.set_status(format!(
+                                            "Could not inspect primary disk: {e}"
+                                        )),
+                                    }
+                                }
+                            } else {
+                                app.set_status("No primary virtual disk found");
+                            }
+                        }
                         MenuAction::ResetVm => {
                             app.push_screen(Screen::Confirm(ConfirmAction::ResetVm));
                         }
@@ -2466,11 +2495,16 @@ fn render_text_input(app: &App, context: &TextInputContext, frame: &mut Frame) {
     let title = match context {
         TextInputContext::SnapshotName => " Enter Snapshot Name ",
         TextInputContext::RenameVm => " Enter New VM Name ",
+        TextInputContext::ResizeVmDisk { .. } => " Increase Disk Size ",
     };
 
     let area = frame.area();
     let dialog_width = 50.min(area.width.saturating_sub(4));
-    let dialog_height = 5;
+    let dialog_height = if matches!(context, TextInputContext::ResizeVmDisk { .. }) {
+        7
+    } else {
+        5
+    };
 
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
     frame.render_widget(Clear, dialog_area);
@@ -2484,8 +2518,18 @@ fn render_text_input(app: &App, context: &TextInputContext, frame: &mut Frame) {
     let inner = block.inner(dialog_area);
     frame.render_widget(block, dialog_area);
 
-    let input = Paragraph::new(format!("{}_", app.text_input_buffer))
-        .style(Style::default().fg(Color::White));
+    let input_text = match context {
+        TextInputContext::ResizeVmDisk { current_size_bytes } => {
+            const GIB: f64 = (1024 * 1024 * 1024) as f64;
+            format!(
+                "Current: {:.2} GiB  New total: {}_ GiB\n\nExpand the partition/filesystem inside the guest afterward.",
+                *current_size_bytes as f64 / GIB,
+                app.text_input_buffer
+            )
+        }
+        _ => format!("{}_", app.text_input_buffer),
+    };
+    let input = Paragraph::new(input_text).style(Style::default().fg(Color::White));
     frame.render_widget(input, inner);
 }
 
@@ -2497,6 +2541,41 @@ fn handle_text_input(app: &mut App, context: TextInputContext, key: KeyEvent) ->
         }
         KeyCode::Enter => {
             let input = app.text_input_buffer.clone();
+
+            if matches!(context, TextInputContext::ResizeVmDisk { .. }) {
+                let new_size_gib = match input.trim().parse::<u64>() {
+                    Ok(size) if size > 0 => size,
+                    _ => {
+                        app.set_status("Enter a whole number of GiB greater than zero");
+                        return Ok(());
+                    }
+                };
+                let Some(vm) = app.selected_vm().cloned() else {
+                    app.set_status("No VM selected");
+                    return Ok(());
+                };
+                if app.selected_vm_pid().is_some() {
+                    app.set_status("Stop the VM before resizing its disk");
+                    return Ok(());
+                }
+                let Some(disk) = vm.config.system_disk() else {
+                    app.set_status("No primary virtual disk found");
+                    return Ok(());
+                };
+
+                match crate::commands::qemu_img::resize_disk(&disk.path, new_size_gib) {
+                    Ok(()) => {
+                        app.text_input_buffer.clear();
+                        app.pop_screen();
+                        app.set_status(format!(
+                            "Disk increased to {new_size_gib} GiB; expand it inside the guest OS"
+                        ));
+                    }
+                    Err(e) => app.set_status(format!("Could not resize disk: {e}")),
+                }
+                return Ok(());
+            }
+
             app.text_input_buffer.clear();
             app.pop_screen();
 
@@ -2540,6 +2619,7 @@ fn handle_text_input(app: &mut App, context: TextInputContext, key: KeyEvent) ->
                         }
                     }
                 }
+                TextInputContext::ResizeVmDisk { .. } => unreachable!(),
             }
         }
         KeyCode::Backspace => {
@@ -2562,6 +2642,7 @@ fn handle_text_input(app: &mut App, context: TextInputContext, key: KeyEvent) ->
                         || c == '('
                         || c == ')'
                 }
+                TextInputContext::ResizeVmDisk { .. } => c.is_ascii_digit(),
             };
             if allowed {
                 app.text_input_buffer.push(c);
