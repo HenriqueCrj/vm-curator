@@ -923,17 +923,9 @@ fn apply_edit(app: &mut App, item: SettingsItem) -> anyhow::Result<()> {
 
     match item {
         SettingsItem::VmLibraryPath => {
-            let path = std::path::PathBuf::from(value);
-            // Expand ~ to home directory
-            let path = if let Some(rest) = value.strip_prefix("~/") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(rest)
-                } else {
-                    path
-                }
-            } else {
-                path
-            };
+            // Expand ~ and anchor bare relative paths at home so the stored
+            // path is always absolute (#79).
+            let path = crate::config::expand_user_path(value);
 
             // Create directory if it doesn't exist, with BTRFS CoW optimization
             if !path.exists() {
@@ -958,16 +950,7 @@ fn apply_edit(app: &mut App, item: SettingsItem) -> anyhow::Result<()> {
             if value.is_empty() {
                 app.config.default_iso_path = None;
             } else {
-                let path = std::path::PathBuf::from(value);
-                let path = if let Some(rest) = value.strip_prefix("~/") {
-                    if let Some(home) = dirs::home_dir() {
-                        home.join(rest)
-                    } else {
-                        path
-                    }
-                } else {
-                    path
-                };
+                let path = crate::config::expand_user_path(value);
 
                 if !path.is_dir() {
                     app.set_status(format!(

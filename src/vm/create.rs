@@ -25,7 +25,9 @@ fn shell_escape(s: &str) -> String {
 
 use crate::commands::qemu_img;
 use crate::vm::qemu_config::{PortForward, PortProtocol};
-use crate::wizard_types::{CreateWizardState, DiskAction, DiskImageFormat, WizardQemuConfig};
+use crate::wizard_types::{
+    CreateWizardState, DiskAction, DiskImageFormat, WizardDiskSource, WizardQemuConfig,
+};
 
 /// Install media type for QEMU command generation
 pub enum InstallMedia<'a> {
@@ -322,30 +324,56 @@ pub fn create_vm_with_disk_format(
     }
 
     // Validate disk configuration
-    let existing_disk_path = if state.use_existing_disk {
-        let Some(path) = state.existing_disk_path.as_ref() else {
-            bail!("No existing disk selected");
-        };
-        if !path.exists() {
-            bail!("Selected disk does not exist: {}", path.display());
+    let existing_disk_path = match state.disk_source {
+        WizardDiskSource::ExistingImage => {
+            let Some(path) = state.existing_disk_path.as_ref() else {
+                bail!("No existing disk selected");
+            };
+            if !path.exists() {
+                bail!("Selected disk does not exist: {}", path.display());
+            }
+            if is_block_device(path) {
+                bail!(
+                    "{} is a physical block device, not a disk image. \
+                     Use the Physical Disk option instead of Use Existing.",
+                    path.display()
+                );
+            }
+            Some(path)
         }
-        Some(path)
-    } else {
-        if state.disk_size_gb == 0 {
-            bail!("Disk size must be greater than 0");
+        WizardDiskSource::NewImage => {
+            if state.disk_size_gb == 0 {
+                bail!("Disk size must be greater than 0");
+            }
+            None
         }
-        None
+        WizardDiskSource::PhysicalDevice => {
+            let Some(device) = state.physical_disk.as_ref() else {
+                bail!("No physical disk selected");
+            };
+            if !device.dev_path.exists() {
+                bail!("Physical disk not found: {}", device.dev_path.display());
+            }
+            None
+        }
     };
 
     // Create VM directory
     let vm_dir = create_vm_directory(library_path, &state.folder_name)?;
 
-    // Create or copy/move disk image
+    // Create or copy/move the disk image — or, for physical passthrough,
+    // reference the device in place (nothing is created or copied).
     let disk_format = existing_disk_path
         .map(|path| detect_existing_disk_image_format(path))
         .unwrap_or(new_disk_format);
     let disk_filename = format!("{}.{}", state.folder_name, disk_format.extension());
-    let disk_path = if let Some(existing_disk_path) = existing_disk_path {
+    let disk_path = if let Some(device) = state
+        .physical_disk
+        .as_ref()
+        .filter(|_| state.disk_source == WizardDiskSource::PhysicalDevice)
+    {
+        device.launch_path().to_path_buf()
+    } else if let Some(existing_disk_path) = existing_disk_path {
         handle_existing_disk(
             &vm_dir,
             &disk_filename,
@@ -375,9 +403,14 @@ pub fn create_vm_with_disk_format(
     }
 
     // Generate and write launch script with OS-awareness
+    let disk_target = if state.disk_source == WizardDiskSource::PhysicalDevice {
+        DiskTarget::PhysicalDevice(&disk_path)
+    } else {
+        DiskTarget::VmFile(&disk_filename)
+    };
     let script_content = generate_launch_script_with_os(
         &state.vm_name,
-        &disk_filename,
+        disk_target,
         state.iso_path.as_deref(),
         state.is_recovery_image,
         &qemu_config,
@@ -404,6 +437,18 @@ pub(crate) fn detect_existing_disk_image_format(path: &Path) -> DiskImageFormat 
         .unwrap_or(DiskImageFormat::Qcow2)
 }
 
+/// True if the path names a physical block device (by /dev prefix or file type).
+/// Guards against catastrophic fs::copy/fs::rename of a raw disk.
+pub(crate) fn is_block_device(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    if path.starts_with("/dev") {
+        return true;
+    }
+    fs::metadata(path)
+        .map(|m| m.file_type().is_block_device())
+        .unwrap_or(false)
+}
+
 /// Handle an existing disk by copying or moving it to the VM directory
 fn handle_existing_disk(
     vm_dir: &Path,
@@ -412,6 +457,13 @@ fn handle_existing_disk(
     action: &DiskAction,
 ) -> Result<PathBuf> {
     let dest = vm_dir.join(filename);
+
+    if is_block_device(source) {
+        bail!(
+            "Refusing to copy/move physical block device {}",
+            source.display()
+        );
+    }
 
     match action {
         DiskAction::Copy => {
@@ -742,16 +794,37 @@ fi
     )
 }
 
+/// Launch-time safety checks emitted after `DISK=` for physical passthrough:
+/// refuse to start if the device is missing, inaccessible, or mounted.
+const PHYSICAL_DISK_PREFLIGHT: &str = r#"if [[ ! -b "$DISK" ]]; then
+    echo "Error: passthrough disk not found: $DISK"
+    exit 1
+fi
+if [[ ! -r "$DISK" || ! -w "$DISK" ]]; then
+    echo "Error: no read/write access to $DISK"
+    echo "Fix (pick one):"
+    echo "  sudo usermod -aG disk $USER   # then log out and back in"
+    echo "  or add a udev rule granting your user access to this disk"
+    exit 1
+fi
+if command -v lsblk >/dev/null 2>&1 \
+   && lsblk -no MOUNTPOINTS "$(readlink -f "$DISK")" 2>/dev/null | grep -q .; then
+    echo "Error: $DISK has mounted partitions; unmount them first"
+    exit 1
+fi
+"#;
+
 /// Generate the launch.sh script content with OS profile awareness
-pub fn generate_launch_script_with_os(
+pub fn generate_launch_script_with_os<'a>(
     vm_name: &str,
-    disk_filename: &str,
+    disk: impl Into<DiskTarget<'a>>,
     iso_path: Option<&Path>,
     is_recovery_image: bool,
     config: &WizardQemuConfig,
     os_profile: Option<&str>,
     floppy_path: Option<&Path>,
 ) -> String {
+    let disk: DiskTarget<'a> = disk.into();
     let mut script = String::new();
 
     let is_windows = is_windows_10_or_11(os_profile);
@@ -782,7 +855,22 @@ pub fn generate_launch_script_with_os(
 
     // Variables
     script.push_str("VM_DIR=\"$(dirname \"$(readlink -f \"$0\")\")\"\n");
-    script.push_str(&format!("DISK=\"$VM_DIR/{}\"\n", disk_filename));
+    match disk {
+        DiskTarget::VmFile(disk_filename) => {
+            script.push_str(&format!("DISK=\"$VM_DIR/{}\"\n", disk_filename));
+        }
+        DiskTarget::PhysicalDevice(device_path) => {
+            script.push_str(
+                "# WARNING: $DISK is a raw physical disk passed through to the guest —\n\
+                 # all data on it is writable by the VM\n",
+            );
+            script.push_str(&format!(
+                "DISK={}\n",
+                shell_escape(&device_path.display().to_string())
+            ));
+            script.push_str(PHYSICAL_DISK_PREFLIGHT);
+        }
+    }
 
     if is_recovery_image {
         // Recovery image (DMG) variable
@@ -874,18 +962,13 @@ fi
     } else {
         None
     };
-    let base_cmd = build_qemu_command_with_os(
-        config,
-        disk_filename,
-        &InstallMedia::None,
-        os_profile,
-        floppy_ref,
-    );
+    let base_cmd =
+        build_qemu_command_with_os(config, disk, &InstallMedia::None, os_profile, floppy_ref);
 
     let install_cmd = if is_recovery_image {
         build_qemu_command_with_os(
             config,
-            disk_filename,
+            disk,
             &InstallMedia::RecoveryImage(None),
             os_profile,
             floppy_ref,
@@ -893,7 +976,7 @@ fi
     } else {
         build_qemu_command_with_os(
             config,
-            disk_filename,
+            disk,
             &InstallMedia::Iso(None),
             os_profile,
             floppy_ref,
@@ -948,7 +1031,7 @@ fi
 
     let cdrom_cmd = build_qemu_command_with_os(
         config,
-        disk_filename,
+        disk,
         &InstallMedia::Iso(Some("\"$2\"")),
         os_profile,
         floppy_ref,
@@ -970,7 +1053,7 @@ fi
 
     let recovery_cmd = build_qemu_command_with_os(
         config,
-        disk_filename,
+        disk,
         &InstallMedia::RecoveryImage(Some("\"$2\"")),
         os_profile,
         floppy_ref,
@@ -992,7 +1075,7 @@ fi
 
     let floppy_cmd = build_qemu_command_with_os_impl(
         config,
-        disk_filename,
+        disk,
         &InstallMedia::None,
         os_profile,
         Some("\"$2\""),
@@ -1034,38 +1117,51 @@ pub(crate) const SPICE_AGENT_ARGS: &[&str] = &[
     "-device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0",
 ];
 
-fn disk_format_for_filename(disk_filename: &str) -> &'static str {
-    DiskImageFormat::from_path(Path::new(disk_filename))
-        .unwrap_or(DiskImageFormat::Qcow2)
-        .as_str()
+/// What the generated script's `$DISK` variable points at.
+#[derive(Debug, Clone, Copy)]
+pub enum DiskTarget<'a> {
+    /// A disk image file inside the VM directory (existing behavior)
+    VmFile(&'a str),
+    /// A whole physical block device passed through from the host
+    PhysicalDevice(&'a Path),
+}
+
+impl<'a> From<&'a str> for DiskTarget<'a> {
+    fn from(filename: &'a str) -> Self {
+        DiskTarget::VmFile(filename)
+    }
+}
+
+fn disk_format_for_target(disk: DiskTarget<'_>) -> &'static str {
+    match disk {
+        // Physical block devices are always raw
+        DiskTarget::PhysicalDevice(_) => "raw",
+        DiskTarget::VmFile(disk_filename) => DiskImageFormat::from_path(Path::new(disk_filename))
+            .unwrap_or(DiskImageFormat::Qcow2)
+            .as_str(),
+    }
 }
 
 /// Build the QEMU command string with OS-awareness
-fn build_qemu_command_with_os(
+fn build_qemu_command_with_os<'a>(
     config: &WizardQemuConfig,
-    disk_filename: &str,
+    disk: impl Into<DiskTarget<'a>>,
     install_media: &InstallMedia,
     os_profile: Option<&str>,
     floppy_path: Option<&str>,
 ) -> String {
-    build_qemu_command_with_os_impl(
-        config,
-        disk_filename,
-        install_media,
-        os_profile,
-        floppy_path,
-        false,
-    )
+    build_qemu_command_with_os_impl(config, disk, install_media, os_profile, floppy_path, false)
 }
 
-fn build_qemu_command_with_os_impl(
+fn build_qemu_command_with_os_impl<'a>(
     config: &WizardQemuConfig,
-    disk_filename: &str,
+    disk: impl Into<DiskTarget<'a>>,
     install_media: &InstallMedia,
     os_profile: Option<&str>,
     floppy_path: Option<&str>,
     boot_from_floppy: bool,
 ) -> String {
+    let disk: DiskTarget<'a> = disk.into();
     let mut args: Vec<String> = Vec::new();
 
     let is_windows = is_windows_10_or_11(os_profile);
@@ -1154,61 +1250,74 @@ fn build_qemu_command_with_os_impl(
     // Disk (interface escaped to prevent injection)
     // Map "sata" to "ide" for backwards compatibility — QEMU doesn't support if=sata,
     // but on Q35 machines, if=ide routes through the AHCI controller (giving SATA behavior)
-    let disk_format = disk_format_for_filename(disk_filename);
+    let disk_format = disk_format_for_target(disk);
     let machine_name = config.machine.as_deref().unwrap_or("");
     let mut disk_has_bootindex = false;
-    match machine_name {
-        "q800" => {
-            // q800: explicit SCSI device attachment for built-in ESP controller
-            args.push(format!(
-                "-drive file=\"$DISK\",format={},if=none,id=hd0",
-                disk_format
-            ));
-            args.push("-device scsi-hd,drive=hd0".to_string());
+    if let DiskTarget::PhysicalDevice(_) = disk {
+        // Whole-disk passthrough: always raw via virtio-blk with host cache
+        // bypassed. bootindex only for normal boots so install media keeps
+        // priority during installation.
+        args.push("-drive file=\"$DISK\",format=raw,if=none,id=sysdisk,cache=none".to_string());
+        if matches!(install_media, InstallMedia::None) && !boot_from_floppy {
+            args.push("-device virtio-blk-pci,drive=sysdisk,bootindex=0".to_string());
+            disk_has_bootindex = true;
+        } else {
+            args.push("-device virtio-blk-pci,drive=sysdisk".to_string());
         }
-        "mac99" => {
-            // mac99: explicit IDE device attachment with bus specification
-            args.push(format!(
-                "-drive file=\"$DISK\",format={},if=none,id=hd0",
-                disk_format
-            ));
-            args.push("-device ide-hd,drive=hd0,bus=ide.0".to_string());
-        }
-        _ => {
-            if is_intel_macos_vm && needs_uefi {
-                // Explicit AHCI controller with predictable bus addressing for macOS
-                args.push("-device ich9-ahci,id=sata".to_string());
-                // OpenCore bootloader as sata.0 (if provided via bios_rom)
-                if config.bios_path.is_some() {
-                    args.push("-drive file=\"$ROM\",format=qcow2,if=none,id=oc".to_string());
-                    args.push("-device ide-hd,drive=oc,bus=sata.0".to_string());
-                }
-                // Main disk (sata.1 with OpenCore, sata.0 without)
-                let disk_bus = if config.bios_path.is_some() {
-                    "sata.1"
-                } else {
-                    "sata.0"
-                };
+    } else {
+        match machine_name {
+            "q800" => {
+                // q800: explicit SCSI device attachment for built-in ESP controller
                 args.push(format!(
-                    "-drive file=\"$DISK\",format={},if=none,id=maindisk",
+                    "-drive file=\"$DISK\",format={},if=none,id=hd0",
                     disk_format
                 ));
-                args.push(format!("-device ide-hd,drive=maindisk,bus={}", disk_bus));
-            } else {
-                let disk_if = if config.disk_interface == "sata" {
-                    "ide"
-                } else {
-                    &config.disk_interface
-                };
-                if normal_uefi_disk_boot && disk_if == "virtio" {
-                    args.push("-global virtio-blk-pci.bootindex=0".to_string());
-                    disk_has_bootindex = true;
-                }
+                args.push("-device scsi-hd,drive=hd0".to_string());
+            }
+            "mac99" => {
+                // mac99: explicit IDE device attachment with bus specification
                 args.push(format!(
-                    "-drive file=\"$DISK\",format={},if={},index=0,media=disk",
-                    disk_format,
-                    shell_escape(disk_if)
+                    "-drive file=\"$DISK\",format={},if=none,id=hd0",
+                    disk_format
                 ));
+                args.push("-device ide-hd,drive=hd0,bus=ide.0".to_string());
+            }
+            _ => {
+                if is_intel_macos_vm && needs_uefi {
+                    // Explicit AHCI controller with predictable bus addressing for macOS
+                    args.push("-device ich9-ahci,id=sata".to_string());
+                    // OpenCore bootloader as sata.0 (if provided via bios_rom)
+                    if config.bios_path.is_some() {
+                        args.push("-drive file=\"$ROM\",format=qcow2,if=none,id=oc".to_string());
+                        args.push("-device ide-hd,drive=oc,bus=sata.0".to_string());
+                    }
+                    // Main disk (sata.1 with OpenCore, sata.0 without)
+                    let disk_bus = if config.bios_path.is_some() {
+                        "sata.1"
+                    } else {
+                        "sata.0"
+                    };
+                    args.push(format!(
+                        "-drive file=\"$DISK\",format={},if=none,id=maindisk",
+                        disk_format
+                    ));
+                    args.push(format!("-device ide-hd,drive=maindisk,bus={}", disk_bus));
+                } else {
+                    let disk_if = if config.disk_interface == "sata" {
+                        "ide"
+                    } else {
+                        &config.disk_interface
+                    };
+                    if normal_uefi_disk_boot && disk_if == "virtio" {
+                        args.push("-global virtio-blk-pci.bootindex=0".to_string());
+                        disk_has_bootindex = true;
+                    }
+                    args.push(format!(
+                        "-drive file=\"$DISK\",format={},if={},index=0,media=disk",
+                        disk_format,
+                        shell_escape(disk_if)
+                    ));
+                }
             }
         }
     }
@@ -1439,7 +1548,7 @@ fn build_qemu_command_with_os_impl(
 
     // QMP monitor socket — enables pause/resume and live monitoring
     args.push("-qmp".to_string());
-    args.push("unix:$VM_DIR/qemu.sock,server=on,wait=off".to_string());
+    args.push("unix:\"$VM_DIR/qemu.sock\",server=on,wait=off".to_string());
 
     args.join(" \\\n        ")
 }

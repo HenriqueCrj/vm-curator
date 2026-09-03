@@ -227,15 +227,35 @@ fn render_gpu_info(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(rom_text, Style::default().fg(rom_color)),
         ]));
 
-        // AMD-specific guidance: AMD GPUs usually need a clean vBIOS to output video
-        if config.gpu.is_amd() && config.gpu_rom.is_none() {
+        // Hide KVM (#71) — kvm=off + hv_vendor_id so NVIDIA/AMD Windows drivers
+        // don't refuse to run inside a visible hypervisor
+        let (kvm_text, kvm_color) = if config.hide_kvm {
+            ("On — kvm=off,hv_vendor_id ([h] to toggle)", Color::Green)
+        } else {
+            ("Off ([h] to toggle)", Color::DarkGray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Hide KVM: ", Style::default().fg(Color::White)),
+            Span::styled(kvm_text, Style::default().fg(kvm_color)),
+        ]));
+
+        // Integrated GPUs (APUs) are the riskiest case: unbinding them can hang
+        // or power off the host, and guest video needs a vBIOS from the
+        // machine's own BIOS image (#61).
+        if config.gpu.is_integrated_gpu() {
+            lines.push(Line::styled(
+                "  WARNING: Integrated GPU (APU) — passthrough is best-effort and",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                "  may hang the host. A vBIOS from YOUR OWN BIOS image is required.",
+                Style::default().fg(Color::Red),
+            ));
+        } else if config.gpu.is_amd() && config.gpu_rom.is_none() {
+            // AMD-specific guidance: AMD GPUs usually need a clean vBIOS to output video
             lines.push(Line::styled(
                 "  AMD GPU: no video without a vBIOS ROM is common. Press [r] to set one.",
                 Style::default().fg(Color::Yellow),
-            ));
-            lines.push(Line::styled(
-                "  Integrated (APU) GPUs are often unsupported for passthrough.",
-                Style::default().fg(Color::DarkGray),
             ));
         }
     } else {
@@ -318,7 +338,7 @@ fn render_scripts_info(app: &App, frame: &mut Frame, area: Rect) {
 /// Render help text
 fn render_help(_app: &App, frame: &mut Frame, area: Rect) {
     let help =
-        Paragraph::new("[g] Generate  [d] Delete  [r] Set vBIOS ROM  [R] Clear ROM  [Esc] Back")
+        Paragraph::new("[g] Generate  [d] Delete  [r/R] Set/Clear vBIOS  [h] Hide KVM  [Esc] Back")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
     frame.render_widget(help, area);
@@ -435,6 +455,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<()> {
             if app.single_gpu_config.is_some() {
                 app.load_file_browser(crate::app::FileBrowserMode::SingleGpuRom);
                 app.push_screen(Screen::FileBrowser);
+            } else {
+                app.set_status("No GPU configured for passthrough");
+            }
+        }
+        KeyCode::Char('h') | KeyCode::Char('H') => {
+            // Toggle hiding the hypervisor from the guest (#71)
+            let toggled = if let Some(ref mut config) = app.single_gpu_config {
+                config.hide_kvm = !config.hide_kvm;
+                Some(config.hide_kvm)
+            } else {
+                None
+            };
+            if let Some(enabled) = toggled {
+                if let (Some(vm), Some(config)) =
+                    (app.selected_vm(), app.single_gpu_config.as_ref())
+                {
+                    let _ = crate::hardware::save_config(&vm.path, config);
+                }
+                app.set_status(if enabled {
+                    "Hide KVM on — regenerate scripts ([g]) to apply"
+                } else {
+                    "Hide KVM off — regenerate scripts ([g]) to apply"
+                });
             } else {
                 app.set_status("No GPU configured for passthrough");
             }
@@ -574,11 +617,13 @@ pub fn init_single_gpu_config(app: &mut App) {
 
     if let Some(gpu) = gpu {
         let mut config = SingleGpuConfig::new(gpu, &app.pci_devices);
-        // Carry over a previously-saved vBIOS ROM path (#44) so it survives
-        // re-entry; the rest of the config is re-detected from live hardware.
+        // Carry over previously-saved user choices (#44 vBIOS ROM, #71 hide-KVM)
+        // so they survive re-entry; the rest of the config is re-detected from
+        // live hardware.
         if let Some(vm) = app.selected_vm() {
             if let Some(saved) = crate::hardware::load_config(&vm.path) {
                 config.gpu_rom = saved.gpu_rom;
+                config.hide_kvm = saved.hide_kvm;
             }
         }
         app.single_gpu_config = Some(config);

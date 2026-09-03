@@ -188,3 +188,80 @@ qemu-system-m68k \
     // Should NOT trigger UEFI detection
     assert!(!config.uefi, "Bios ROM should not trigger UEFI");
 }
+
+#[test]
+fn test_disk_roles_pflash_and_cdrom_excluded() {
+    // Fedora-style regression: qcow2 OVMF firmware must not count as the
+    // VM's snapshot-capable primary disk.
+    let vm_dir = Path::new("/home/user/vms/win11-physical");
+    let script_path = vm_dir.join("launch.sh");
+    let content = r#"#!/bin/bash
+VM_DIR="$(dirname "$(readlink -f "$0")")"
+DISK="/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456"
+ISO="$VM_DIR/win11.iso"
+
+qemu-system-x86_64 \
+    -m 8192 \
+    -drive if=pflash,format=qcow2,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE_4M.qcow2 \
+    -drive if=pflash,format=qcow2,file="$VM_DIR/OVMF_VARS.qcow2" \
+    -drive file="$DISK",format=raw,if=virtio,index=0,media=disk \
+    -drive file="$ISO",media=cdrom
+"#;
+    let config = parse_launch_script(&script_path, content).unwrap();
+
+    let roles: Vec<DiskRole> = config.disks.iter().map(|d| d.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            DiskRole::Firmware,
+            DiskRole::Firmware,
+            DiskRole::System,
+            DiskRole::Media
+        ]
+    );
+
+    // qcow2 firmware must not make a raw-disk VM look snapshotable
+    assert!(!config.supports_snapshots());
+
+    // primary disk is the physical system disk, never the pflash firmware
+    let primary = config.primary_disk().unwrap();
+    assert_eq!(
+        primary.path,
+        PathBuf::from("/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456")
+    );
+    assert!(primary.is_physical_device());
+    // /dev paths are always raw and must not be probed with qemu-img
+    assert_eq!(primary.format, DiskFormat::Raw);
+}
+
+#[test]
+fn test_disk_roles_qcow2_system_disk_still_snapshotable() {
+    let vm_dir = Path::new("/home/user/vms/fedora");
+    let script_path = vm_dir.join("launch.sh");
+    let content = r#"#!/bin/bash
+VM_DIR="$(dirname "$(readlink -f "$0")")"
+DISK="$VM_DIR/fedora.qcow2"
+
+qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+    -drive file="$DISK",format=qcow2,if=virtio \
+    -drive file="$VM_DIR/install.iso",media=cdrom
+"#;
+    let config = parse_launch_script(&script_path, content).unwrap();
+
+    assert!(config.supports_snapshots());
+    let primary = config.primary_disk().unwrap();
+    assert!(primary.path.to_string_lossy().ends_with("fedora.qcow2"));
+    assert_eq!(primary.role, DiskRole::System);
+    assert!(!primary.is_physical_device());
+}
+
+#[test]
+fn test_physical_device_path_not_resolved_relative() {
+    // Absolute /dev paths must pass through resolve_path untouched
+    let vm_dir = Path::new("/home/user/vms/x");
+    assert_eq!(
+        resolve_path("/dev/nvme0n1", vm_dir),
+        PathBuf::from("/dev/nvme0n1")
+    );
+}

@@ -13,6 +13,9 @@ pub struct ConfirmDialog<'a> {
     pub cancel_label: &'a str,
     /// Optional middle button (e.g. "Discard") for three-way prompts.
     pub extra_label: Option<&'a str>,
+    /// Dialog size; defaults to 50x8. Raise for long messages.
+    pub width: u16,
+    pub height: u16,
 }
 
 impl<'a> ConfirmDialog<'a> {
@@ -23,13 +26,15 @@ impl<'a> ConfirmDialog<'a> {
             confirm_label: "Yes (y)",
             cancel_label: "No (n)",
             extra_label: None,
+            width: 50,
+            height: 8,
         }
     }
 
     pub fn render(self, area: Rect, buf: &mut Buffer) {
         // Calculate dialog size
-        let dialog_width = 50.min(area.width.saturating_sub(4));
-        let dialog_height = 8.min(area.height.saturating_sub(4));
+        let dialog_width = self.width.min(area.width.saturating_sub(4));
+        let dialog_height = self.height.min(area.height.saturating_sub(4));
 
         let dialog_area = centered_rect(dialog_width, dialog_height, area);
 

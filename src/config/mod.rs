@@ -101,6 +101,33 @@ impl Default for Config {
     }
 }
 
+/// Expand a user-entered path: `~`/`~/...` become the home directory, and a
+/// bare relative path (e.g. `VMs`) is anchored at home.
+///
+/// Persisted paths must be absolute: a relative library path resolves against
+/// the process's current directory, which changes between sessions — discovery
+/// then works from one directory and launching fails from another (#79).
+pub fn expand_user_path(input: &str) -> PathBuf {
+    let home = dirs::home_dir();
+    let path = if let Some(rest) = input.strip_prefix("~/") {
+        match &home {
+            Some(home) => home.join(rest),
+            None => PathBuf::from(input),
+        }
+    } else if input == "~" {
+        home.clone().unwrap_or_else(|| PathBuf::from(input))
+    } else {
+        PathBuf::from(input)
+    };
+
+    if path.is_relative() {
+        if let Some(home) = home {
+            return home.join(path);
+        }
+    }
+    path
+}
+
 impl Config {
     /// Load configuration from the default file path, or return defaults if absent.
     pub fn load() -> Result<Self> {
@@ -115,10 +142,28 @@ impl Config {
         if config_path.exists() {
             let content = std::fs::read_to_string(config_path)
                 .with_context(|| format!("Failed to read config from {:?}", config_path))?;
-            toml::from_str(&content)
-                .with_context(|| format!("Failed to parse config from {:?}", config_path))
+            let mut config: Self = toml::from_str(&content)
+                .with_context(|| format!("Failed to parse config from {:?}", config_path))?;
+            config.normalize_paths();
+            Ok(config)
         } else {
             Ok(Self::default())
+        }
+    }
+
+    /// Self-heal configs written by older versions that stored relative or
+    /// `~`-prefixed paths verbatim (#79): anchor them at the home directory so
+    /// behavior no longer depends on the directory vm-curator is started from.
+    fn normalize_paths(&mut self) {
+        for path in [
+            &mut self.vm_library_path,
+            &mut self.metadata_path,
+            &mut self.ascii_art_path,
+        ] {
+            *path = expand_user_path(&path.to_string_lossy());
+        }
+        if let Some(iso_path) = &mut self.default_iso_path {
+            *iso_path = expand_user_path(&iso_path.to_string_lossy());
         }
     }
 
@@ -242,5 +287,36 @@ mod tests {
     fn config_file_path_ends_with_expected_segments() {
         let path = Config::config_file_path();
         assert!(path.ends_with("vm-curator/config.toml"));
+    }
+
+    #[test]
+    fn expand_user_path_handles_tilde_and_relative() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_user_path("~/VMs"), home.join("VMs"));
+        assert_eq!(expand_user_path("~"), home);
+        // Bare relative paths anchor at home — the #79 case
+        assert_eq!(expand_user_path("VMs"), home.join("VMs"));
+        assert_eq!(expand_user_path("a/b"), home.join("a/b"));
+        // Absolute paths pass through untouched
+        assert_eq!(expand_user_path("/mnt/vms"), PathBuf::from("/mnt/vms"));
+    }
+
+    #[test]
+    fn load_from_relative_library_path_is_anchored_at_home() {
+        // Regression for #79: a stored relative path made discovery depend on
+        // the process cwd and broke launching entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "vm_library_path = \"VMs\"\ndefault_iso_path = \"~/isos\"\n",
+        )
+        .unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(loaded.vm_library_path, home.join("VMs"));
+        assert_eq!(loaded.default_iso_path, Some(home.join("isos")));
+        assert!(loaded.vm_library_path.is_absolute());
     }
 }

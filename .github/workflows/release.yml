@@ -166,3 +166,43 @@ jobs:
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Bump the Homebrew tap (mroboff/homebrew-tap) to the new release.
+  # Requires the HOMEBREW_TAP_TOKEN repo secret: a fine-grained PAT with
+  # contents read/write on mroboff/homebrew-tap. Skips cleanly if unset.
+  update-homebrew-tap:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update tap formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set; skipping tap update"
+            exit 0
+          fi
+          VERSION="${TAG_NAME#v}"
+          ASSET="vm-curator-${TAG_NAME}-linux-x86_64.tar.gz"
+          curl -fsSL -o release.tar.gz \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/${ASSET}"
+          SHA="$(sha256sum release.tar.gz | cut -d' ' -f1)"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/mroboff/homebrew-tap.git" tap
+          cd tap
+          FORMULA=Formula/vm-curator.rb
+          sed -i -E "s|^(  version )\"[^\"]*\"|\1\"${VERSION}\"|" "$FORMULA"
+          sed -i -E "s|download/v[0-9][^/]*/vm-curator-v[0-9][^/]*-linux-x86_64\.tar\.gz|download/${TAG_NAME}/${ASSET}|" "$FORMULA"
+          # NOTE: replaces the first sha256 in the file — revisit when macOS
+          # assets are added alongside the Linux one.
+          sed -i -E "0,/sha256 \"[0-9a-f]{64}\"/s//sha256 \"${SHA}\"/" "$FORMULA"
+
+          if git diff --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "vm-curator ${VERSION}"
+          git push

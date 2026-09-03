@@ -636,7 +636,7 @@ fn existing_disk_state(
     CreateWizardState {
         vm_name: format!("{folder_name} display"),
         folder_name: folder_name.to_string(),
-        use_existing_disk: true,
+        disk_source: crate::wizard_types::WizardDiskSource::ExistingImage,
         existing_disk_path: Some(source),
         existing_disk_action: action,
         ..CreateWizardState::default()
@@ -649,7 +649,7 @@ fn test_create_vm_requires_existing_disk_path() -> Result<()> {
     let state = CreateWizardState {
         vm_name: "Missing disk".to_string(),
         folder_name: "missing-disk".to_string(),
-        use_existing_disk: true,
+        disk_source: crate::wizard_types::WizardDiskSource::ExistingImage,
         existing_disk_path: None,
         ..CreateWizardState::default()
     };
@@ -1440,4 +1440,124 @@ fn test_default_ovmf_firmware_is_raw() {
     assert_eq!(fw.format, "raw");
     assert!(fw.code.ends_with(".fd"));
     assert!(fw.vars_template.ends_with(".fd"));
+}
+
+#[test]
+fn test_is_block_device_dev_prefix() {
+    assert!(is_block_device(Path::new("/dev/nvme0n1")));
+    assert!(is_block_device(Path::new(
+        "/dev/disk/by-id/ata-WDC_WD40EZRZ_WD-WCC7K1234567"
+    )));
+    assert!(!is_block_device(Path::new("/home/user/vms/disk.qcow2")));
+}
+
+#[test]
+fn test_handle_existing_disk_refuses_block_device() {
+    let tmp = std::env::temp_dir().join("vm-curator-test-blockdev-guard");
+    let _ = fs::create_dir_all(&tmp);
+    let err = handle_existing_disk(
+        &tmp,
+        "test.raw",
+        Path::new("/dev/nvme0n1"),
+        &DiskAction::Copy,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("block device"));
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_generate_launch_script_physical_disk() {
+    let config = WizardQemuConfig::default();
+    let device = Path::new("/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456");
+    let script = generate_launch_script_with_os(
+        "Physical VM",
+        crate::vm::create::DiskTarget::PhysicalDevice(device),
+        None,
+        false,
+        &config,
+        None,
+        None,
+    );
+
+    // $DISK points at the device, not a file in the VM dir
+    assert!(script.contains("DISK=/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456"));
+    assert!(!script.contains("DISK=\"$VM_DIR/"));
+
+    // Warning comment and preflight guards
+    assert!(script.contains("WARNING: $DISK is a raw physical disk"));
+    assert!(script.contains("if [[ ! -b \"$DISK\" ]]"));
+    assert!(script.contains("no read/write access to $DISK"));
+    assert!(script.contains("mounted partitions"));
+
+    // Raw virtio-blk with bootindex on the normal-boot command
+    assert!(script.contains("-drive file=\"$DISK\",format=raw,if=none,id=sysdisk,cache=none"));
+    assert!(script.contains("-device virtio-blk-pci,drive=sysdisk,bootindex=0"));
+
+    // Install-mode command must NOT carry the disk bootindex (ISO boots first)
+    let install_section = script
+        .split("--install)")
+        .nth(1)
+        .and_then(|s| s.split(";;").next())
+        .unwrap();
+    assert!(install_section.contains("-device virtio-blk-pci,drive=sysdisk"));
+    assert!(!install_section.contains("bootindex=0"));
+    assert!(install_section.contains("-boot d"));
+
+    // No qcow2/img file references for the system disk
+    assert!(!script.contains("format=qcow2,if="));
+}
+
+#[test]
+fn test_create_vm_physical_disk_does_not_create_image() -> Result<()> {
+    let library = tempfile::tempdir()?;
+    let state = CreateWizardState {
+        vm_name: "Physical".to_string(),
+        folder_name: "physical".to_string(),
+        disk_source: crate::wizard_types::WizardDiskSource::PhysicalDevice,
+        physical_disk: Some(crate::hardware::block::BlockDevice {
+            name: "null".to_string(),
+            // /dev/null exists everywhere; good enough for the exists() check
+            dev_path: PathBuf::from("/dev/null"),
+            by_id_path: None,
+            model: "Test Device".to_string(),
+            vendor: None,
+            size_bytes: 1_000_000_000,
+            removable: false,
+            rotational: false,
+            bus: crate::hardware::block::BlockBus::Nvme,
+            exclusion: None,
+        }),
+        ..CreateWizardState::default()
+    };
+
+    let created = create_vm(library.path(), &state)?;
+
+    // No disk image created in the VM directory
+    let vm_dir = library.path().join("physical");
+    assert!(!vm_dir.join("physical.qcow2").exists());
+    assert!(!vm_dir.join("physical.raw").exists());
+    assert_eq!(created.disk_image, PathBuf::from("/dev/null"));
+
+    let script = std::fs::read_to_string(created.launch_script)?;
+    assert!(script.contains("DISK=/dev/null"));
+    assert!(script.contains("format=raw,if=none,id=sysdisk"));
+    Ok(())
+}
+
+#[test]
+fn test_create_vm_physical_disk_requires_selection() -> Result<()> {
+    let library = tempfile::tempdir()?;
+    let state = CreateWizardState {
+        vm_name: "Physical".to_string(),
+        folder_name: "physical-missing".to_string(),
+        disk_source: crate::wizard_types::WizardDiskSource::PhysicalDevice,
+        physical_disk: None,
+        ..CreateWizardState::default()
+    };
+
+    let err = create_vm(library.path(), &state).expect_err("missing device should fail");
+    assert_eq!(err.to_string(), "No physical disk selected");
+    assert!(!library.path().join("physical-missing").exists());
+    Ok(())
 }

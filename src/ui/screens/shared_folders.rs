@@ -335,9 +335,9 @@ pub(crate) fn save_selection_and_report(app: &mut App) {
                         }
                     }
                 }
-                app.set_status(status_msg);
                 // Saved state is now the baseline; no unsaved changes remain.
                 app.snapshot_shared_folders_baseline();
+                app.set_status(status_msg);
             }
             Err(e) => {
                 app.set_status(format!("Error saving shared folders: {}", e));

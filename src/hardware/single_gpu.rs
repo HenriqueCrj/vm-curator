@@ -109,6 +109,10 @@ pub struct SingleGpuConfig {
     /// Optional path to a GPU vBIOS ROM, emitted as `romfile=` on the passed-through
     /// GPU. Frequently required for AMD single-GPU passthrough to produce video (#44).
     pub gpu_rom: Option<String>,
+    /// Hide the hypervisor from the guest (`kvm=off,hv_vendor_id=...` on `-cpu`).
+    /// NVIDIA drivers historically refused to run in a VM without this; modern AMD
+    /// (RDNA3/4) Windows drivers black-screen or Code 43 without it too (#71).
+    pub hide_kvm: bool,
 }
 
 impl SingleGpuConfig {
@@ -119,6 +123,7 @@ impl SingleGpuConfig {
         let original_driver = detect_gpu_driver(&gpu);
         let display_manager = detect_display_manager();
 
+        let hide_kvm = default_hide_kvm(&gpu);
         Self {
             gpu,
             audio,
@@ -126,6 +131,7 @@ impl SingleGpuConfig {
             original_driver,
             display_manager,
             gpu_rom: None,
+            hide_kvm,
         }
     }
 
@@ -137,6 +143,12 @@ impl SingleGpuConfig {
         }
         addrs
     }
+}
+
+/// Default for [`SingleGpuConfig::hide_kvm`]: on for NVIDIA and AMD GPUs, whose
+/// Windows drivers misbehave when they detect a hypervisor (#71).
+fn default_hide_kvm(gpu: &PciDevice) -> bool {
+    gpu.is_nvidia() || gpu.is_amd()
 }
 
 /// Detect the currently running display manager
@@ -393,6 +405,7 @@ pub fn save_config(vm_path: &Path, config: &SingleGpuConfig) -> anyhow::Result<(
     if let Some(ref rom) = config.gpu_rom {
         content.push_str(&format!("gpu_rom = \"{}\"\n", rom.replace('"', "\\\"")));
     }
+    content.push_str(&format!("hide_kvm = {}\n", config.hide_kvm));
 
     fs::write(&config_path, content)?;
     Ok(())
@@ -430,6 +443,7 @@ pub fn load_config(vm_path: &Path) -> Option<SingleGpuConfig> {
     let mut original_driver = String::new();
     let mut display_manager = String::new();
     let mut gpu_rom: Option<String> = None;
+    let mut hide_kvm: Option<bool> = None;
 
     let mut current_section = "";
 
@@ -476,6 +490,7 @@ pub fn load_config(vm_path: &Path) -> Option<SingleGpuConfig> {
                     "original_driver" => original_driver = value.to_string(),
                     "display_manager" => display_manager = value.to_string(),
                     "gpu_rom" => gpu_rom = Some(value.to_string()),
+                    "hide_kvm" => hide_kvm = Some(value == "true"),
                     _ => {}
                 },
                 _ => {}
@@ -531,6 +546,9 @@ pub fn load_config(vm_path: &Path) -> Option<SingleGpuConfig> {
         other => DisplayManager::Unknown(other.to_string()),
     };
 
+    // Configs written before #71 lack the key; fall back to the vendor default.
+    let hide_kvm = hide_kvm.unwrap_or_else(|| default_hide_kvm(&gpu));
+
     Some(SingleGpuConfig {
         gpu,
         audio,
@@ -538,6 +556,7 @@ pub fn load_config(vm_path: &Path) -> Option<SingleGpuConfig> {
         original_driver,
         display_manager,
         gpu_rom,
+        hide_kvm,
     })
 }
 

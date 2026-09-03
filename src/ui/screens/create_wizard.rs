@@ -11,7 +11,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, DiskAction, DiskImageFormat, FileBrowserMode, WizardField, WizardQemuConfig, WizardStep,
+    App, DiskAction, DiskImageFormat, FileBrowserMode, WizardDiskSource, WizardField,
+    WizardQemuConfig, WizardStep,
 };
 use crate::metadata::QemuProfileStore;
 use crate::vm::create::create_vm_with_disk_format;
@@ -1452,23 +1453,9 @@ fn render_step_configure_disk(app: &App, frame: &mut Frame, area: Rect) {
 
     // Disk source toggle (field_focus == 0)
     let source_focused = state.field_focus == 0;
-    let create_style = if !state.use_existing_disk {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let existing_style = if state.use_existing_disk {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let prefix = if source_focused { "> " } else { "  " };
 
-    let source_line = Line::from(vec![
+    let mut source_spans = vec![
         Span::styled(
             prefix,
             if source_focused {
@@ -1478,50 +1465,76 @@ fn render_step_configure_disk(app: &App, frame: &mut Frame, area: Rect) {
             },
         ),
         Span::styled("Disk Source: ", Style::default().fg(Color::Yellow)),
-        Span::styled("[ ", Style::default()),
-        Span::styled("Create New", create_style),
-        Span::styled(" ] [ ", Style::default()),
-        Span::styled("Use Existing", existing_style),
-        Span::styled(" ]", Style::default()),
-        if source_focused {
-            Span::styled("  [←/→] toggle", Style::default().fg(Color::DarkGray))
+    ];
+    for (i, source) in [
+        WizardDiskSource::NewImage,
+        WizardDiskSource::ExistingImage,
+        WizardDiskSource::PhysicalDevice,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let style = if state.disk_source == source {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Span::raw("")
-        },
-    ]);
-    let source_toggle = Paragraph::new(source_line);
+            Style::default().fg(Color::DarkGray)
+        };
+        source_spans.push(Span::styled(
+            if i == 0 { "[ " } else { " ] [ " },
+            Style::default(),
+        ));
+        source_spans.push(Span::styled(source.label(), style));
+    }
+    source_spans.push(Span::styled(" ]", Style::default()));
+    if source_focused {
+        source_spans.push(Span::styled(
+            "  [←/→] toggle",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let source_toggle = Paragraph::new(Line::from(source_spans));
     frame.render_widget(source_toggle, chunks[2]);
 
     // Mode-specific content area
     let content_area = chunks[4];
 
-    if state.use_existing_disk {
-        // "Use Existing" mode
-        render_existing_disk_mode(app, frame, content_area);
-    } else {
-        // "Create New" mode (existing behavior)
-        render_new_disk_mode(app, frame, content_area);
+    match state.disk_source {
+        WizardDiskSource::NewImage => render_new_disk_mode(app, frame, content_area),
+        WizardDiskSource::ExistingImage => render_existing_disk_mode(app, frame, content_area),
+        WizardDiskSource::PhysicalDevice => render_physical_disk_mode(app, frame, content_area),
     }
 
     // Help
-    let help_text = if state.use_existing_disk {
-        if state.field_focus == 0 {
-            "[←/→] Toggle mode  [j/k] Navigate  [Enter] Next  [Esc] Back"
-        } else if state.field_focus == 1 {
-            "[Enter] Browse  [j/k] Navigate  [Esc] Back"
-        } else {
-            "[←/→] Toggle action  [j/k] Navigate  [Enter] Next  [Esc] Back"
+    let help_text = match state.disk_source {
+        WizardDiskSource::ExistingImage => {
+            if state.field_focus == 0 {
+                "[←/→] Toggle mode  [j/k] Navigate  [Enter] Next  [Esc] Back"
+            } else if state.field_focus == 1 {
+                "[Enter] Browse  [j/k] Navigate  [Esc] Back"
+            } else {
+                "[←/→] Toggle action  [j/k] Navigate  [Enter] Next  [Esc] Back"
+            }
         }
-    } else {
-        let editing = matches!(state.editing_field, Some(WizardField::DiskSize));
-        if editing {
-            "[Enter] Done  [Backspace] Delete  [0-9] Enter size"
-        } else if state.field_focus == 0 {
-            "[←/→] Toggle mode  [j/k] Navigate  [Enter] Next  [Esc] Back"
-        } else if state.field_focus == 1 {
-            "[Tab] Edit size  [←/→] Adjust  [Enter] Next  [Esc] Back"
-        } else {
-            "[←/→] Toggle format  [j/k] Navigate  [Enter] Next  [Esc] Back"
+        WizardDiskSource::PhysicalDevice => {
+            if state.field_focus == 0 {
+                "[←/→] Toggle mode  [j/k] Navigate  [Enter] Next  [Esc] Back"
+            } else {
+                "[Enter] Select disk  [j/k] Navigate  [Esc] Back"
+            }
+        }
+        WizardDiskSource::NewImage => {
+            let editing = matches!(state.editing_field, Some(WizardField::DiskSize));
+            if editing {
+                "[Enter] Done  [Backspace] Delete  [0-9] Enter size"
+            } else if state.field_focus == 0 {
+                "[←/→] Toggle mode  [j/k] Navigate  [Enter] Next  [Esc] Back"
+            } else if state.field_focus == 1 {
+                "[Tab] Edit size  [←/→] Adjust  [Enter] Next  [Esc] Back"
+            } else {
+                "[←/→] Toggle format  [j/k] Navigate  [Enter] Next  [Esc] Back"
+            }
         }
     };
     let help = Paragraph::new(help_text)
@@ -1758,21 +1771,103 @@ fn render_existing_disk_mode(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(note, sub_chunks[4]);
 }
 
+/// Render the "Physical Disk" passthrough mode content
+fn render_physical_disk_mode(app: &App, frame: &mut Frame, area: Rect) {
+    let state = app.wizard_state.as_ref().unwrap();
+
+    let sub_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // Selected device / select button
+            Constraint::Length(1), // Spacer
+            Constraint::Min(5),    // Danger warning
+        ])
+        .split(area);
+
+    // Selected device box (field_focus == 1)
+    let select_focused = state.field_focus == 1;
+    let select_border = if select_focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    let select_block = Block::default()
+        .title(" Physical Disk ")
+        .borders(Borders::ALL)
+        .border_style(select_border);
+    let select_inner = select_block.inner(sub_chunks[0]);
+    frame.render_widget(select_block, sub_chunks[0]);
+
+    let select_text = if let Some(ref disk) = state.physical_disk {
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("{} ", disk.model),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({}, {})", disk.size_display(), disk.bus.label()),
+                Style::default().fg(Color::Green),
+            ),
+        ])];
+        let mut path_line = disk.launch_path().display().to_string();
+        if disk.by_id_path.is_none() {
+            path_line.push_str("  (no stable by-id path found)");
+        }
+        lines.push(Line::from(Span::styled(
+            path_line,
+            Style::default().fg(Color::DarkGray),
+        )));
+        Paragraph::new(lines)
+    } else {
+        let prefix = if select_focused { "> " } else { "  " };
+        Paragraph::new(format!("{}( ) Select physical disk...", prefix)).style(if select_focused {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        })
+    };
+    frame.render_widget(select_text, select_inner);
+
+    // Persistent danger warning
+    let warning = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "⚠ DANGER: destructive operation",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "The guest OS gets full read/write control of this disk. ALL existing",
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(Span::styled(
+            "data on it can be modified or destroyed. Never select a disk the host",
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(Span::styled(
+            "is using. The disk is passed through as-is; nothing is copied.",
+            Style::default().fg(Color::Red),
+        )),
+    ]);
+    frame.render_widget(warning, sub_chunks[2]);
+}
+
 fn handle_step_configure_disk(app: &mut App, key: KeyEvent) -> Result<()> {
-    let (editing, use_existing, field_focus) = app
+    let (editing, disk_source, field_focus) = app
         .wizard_state
         .as_ref()
         .map(|s| {
             (
                 matches!(s.editing_field, Some(WizardField::DiskSize)),
-                s.use_existing_disk,
+                s.disk_source,
                 s.field_focus,
             )
         })
-        .unwrap_or((false, false, 0));
+        .unwrap_or((false, WizardDiskSource::NewImage, 0));
 
     // Handle disk size editing mode (only in "Create New" mode)
-    if editing && !use_existing {
+    if editing && disk_source == WizardDiskSource::NewImage {
         match key.code {
             KeyCode::Esc => {
                 // Cancel edit, restore original value (clear buffer)
@@ -1826,7 +1921,10 @@ fn handle_step_configure_disk(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(ref mut state) = app.wizard_state {
-                let max_focus = 2;
+                let max_focus = match state.disk_source {
+                    WizardDiskSource::PhysicalDevice => 1,
+                    _ => 2,
+                };
                 if state.field_focus < max_focus {
                     state.field_focus += 1;
                 }
@@ -1841,24 +1939,29 @@ fn handle_step_configure_disk(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Left | KeyCode::Right => {
             if let Some(ref mut state) = app.wizard_state {
-                match state.field_focus {
-                    0 => {
-                        // Toggle disk source mode
-                        state.use_existing_disk = !state.use_existing_disk;
+                match (state.field_focus, state.disk_source) {
+                    (0, _) => {
+                        // Cycle disk source mode
+                        state.disk_source = if key.code == KeyCode::Left {
+                            state.disk_source.prev()
+                        } else {
+                            state.disk_source.next()
+                        };
+                        state.field_focus = 0;
                     }
-                    1 if !state.use_existing_disk => {
-                        // Adjust disk size (Create New mode)
+                    (1, WizardDiskSource::NewImage) => {
+                        // Adjust disk size
                         if key.code == KeyCode::Left {
                             state.disk_size_gb = state.disk_size_gb.saturating_sub(8).max(1);
                         } else {
                             state.disk_size_gb = (state.disk_size_gb + 8).min(10000);
                         }
                     }
-                    2 if !state.use_existing_disk => {
+                    (2, WizardDiskSource::NewImage) => {
                         // Toggle new disk image format
                         app.create_wizard_disk_format = app.create_wizard_disk_format.toggle();
                     }
-                    2 if state.use_existing_disk => {
+                    (2, WizardDiskSource::ExistingImage) => {
                         // Toggle copy/move action
                         state.existing_disk_action = match state.existing_disk_action {
                             DiskAction::Copy => DiskAction::Move,
@@ -1871,7 +1974,7 @@ fn handle_step_configure_disk(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Tab => {
             // Enter edit mode for disk size (Create New mode only)
-            if !use_existing && field_focus == 1 {
+            if disk_source == WizardDiskSource::NewImage && field_focus == 1 {
                 if let Some(ref mut state) = app.wizard_state {
                     state.editing_field = Some(WizardField::DiskSize);
                     state.wizard_edit_buffer = state.disk_size_gb.to_string();
@@ -1879,10 +1982,13 @@ fn handle_step_configure_disk(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Enter => {
-            // If on browse button in existing mode, open file browser
-            if use_existing && field_focus == 1 {
+            if disk_source == WizardDiskSource::ExistingImage && field_focus == 1 {
+                // Browse for a disk image file
                 app.load_file_browser(FileBrowserMode::Disk);
                 app.push_screen(crate::app::Screen::FileBrowser);
+            } else if disk_source == WizardDiskSource::PhysicalDevice && field_focus == 1 {
+                // Open the physical disk picker
+                app.open_physical_disk_picker(crate::app::DiskPickerContext::Wizard);
             } else {
                 // Try to proceed to next step
                 if let Err(e) = app.wizard_next_step() {
@@ -3366,24 +3472,46 @@ fn render_step_confirm(app: &App, frame: &mut Frame, area: Rect) {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "None".to_string());
-    let disk_summary = if state.use_existing_disk {
-        let action = match state.existing_disk_action {
-            DiskAction::Copy => "copy",
-            DiskAction::Move => "move",
-        };
-        let format = state
-            .existing_disk_path
-            .as_deref()
-            .and_then(DiskImageFormat::from_path)
-            .map(|format| format.label())
-            .unwrap_or("detected");
-        format!("existing disk ({action}, {format})")
-    } else {
-        format!(
-            "{} GB {}",
-            state.disk_size_gb,
-            app.create_wizard_disk_format.summary()
-        )
+    let disk_line = match state.disk_source {
+        WizardDiskSource::ExistingImage => {
+            let action = match state.existing_disk_action {
+                DiskAction::Copy => "copy",
+                DiskAction::Move => "move",
+            };
+            let format = state
+                .existing_disk_path
+                .as_deref()
+                .and_then(DiskImageFormat::from_path)
+                .map(|format| format.label())
+                .unwrap_or("detected");
+            Line::from(vec![
+                Span::styled("Disk:           ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("existing disk ({action}, {format})")),
+            ])
+        }
+        WizardDiskSource::NewImage => Line::from(vec![
+            Span::styled("Disk:           ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!(
+                "{} GB {}",
+                state.disk_size_gb,
+                app.create_wizard_disk_format.summary()
+            )),
+        ]),
+        WizardDiskSource::PhysicalDevice => {
+            let desc = state
+                .physical_disk
+                .as_ref()
+                .map(|d| format!("{} ({})", d.model, d.size_display()))
+                .unwrap_or_else(|| "physical disk".to_string());
+            Line::from(vec![
+                Span::styled("Disk:           ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{desc} ")),
+                Span::styled(
+                    "[DESTRUCTIVE — raw device]",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        }
     };
 
     let config = &state.qemu_config;
@@ -3402,10 +3530,7 @@ fn render_step_confirm(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw(os_name),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Disk:           ", Style::default().fg(Color::Yellow)),
-            Span::raw(disk_summary),
-        ]),
+        disk_line,
         Line::from(vec![
             Span::styled("ISO:            ", Style::default().fg(Color::Yellow)),
             Span::raw(iso_str),

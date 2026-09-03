@@ -393,6 +393,7 @@ fn extract_disks(content: &str, vm_dir: &Path) -> Vec<DiskConfig> {
                         path: full_path,
                         format,
                         interface: "ide".to_string(),
+                        role: DiskRole::System,
                     });
                 }
             }
@@ -403,6 +404,13 @@ fn extract_disks(content: &str, vm_dir: &Path) -> Vec<DiskConfig> {
             if let Some(path) = extract_drive_file(line) {
                 let expanded = expand_variables(&path, &vars, vm_dir);
                 let full_path = resolve_path(&expanded, vm_dir);
+                let role = if line.contains("if=pflash") {
+                    DiskRole::Firmware
+                } else if line.contains("media=cdrom") {
+                    DiskRole::Media
+                } else {
+                    DiskRole::System
+                };
                 let format = guess_disk_format(&full_path);
                 let interface = if line.contains("if=virtio") {
                     "virtio"
@@ -415,6 +423,7 @@ fn extract_disks(content: &str, vm_dir: &Path) -> Vec<DiskConfig> {
                     path: full_path,
                     format,
                     interface: interface.to_string(),
+                    role,
                 });
             }
         }
@@ -482,6 +491,12 @@ fn resolve_path(path: &str, vm_dir: &Path) -> PathBuf {
 
 /// Detect disk format using qemu-img info, falling back to extension-based guessing
 fn guess_disk_format(path: &Path) -> DiskFormat {
+    // Physical block devices are always raw; don't probe them with qemu-img
+    // (the device node may not be readable by the current user).
+    if path.starts_with("/dev") {
+        return DiskFormat::Raw;
+    }
+
     // First, try to detect the actual format using qemu-img info
     if path.exists() {
         if let Some(format_str) = qemu_img::detect_disk_format(path) {

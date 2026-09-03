@@ -30,4 +30,5 @@ pub mod fs;
 pub mod hardware;
 pub mod metadata;
 pub mod vm;
+pub mod vnet;
 pub mod wizard_types;

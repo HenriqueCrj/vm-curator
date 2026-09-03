@@ -13,9 +13,9 @@ pub use create::create_vm;
 pub use discovery::{discover_vms, group_vms_by_category, DiscoveredVm};
 pub use lifecycle::{
     detect_qemu_processes, force_stop_vm, launch_vm_sync, launch_vm_with_error_check,
-    load_pci_passthrough, load_shared_folders, load_usb_passthrough, save_shared_folders,
-    save_usb_passthrough, stop_vm_by_pid, LaunchOptions, QemuProcess, SharedFolder, UsbPassthrough,
-    WindowSize,
+    load_disk_passthrough, load_pci_passthrough, load_shared_folders, load_usb_passthrough,
+    save_disk_passthrough, save_shared_folders, save_usb_passthrough, stop_vm_by_pid,
+    DiskPassthrough, LaunchOptions, QemuProcess, SharedFolder, UsbPassthrough, WindowSize,
 };
 pub use qemu_config::{BootMode, QemuConfig};
 pub use single_gpu_scripts::generate_single_gpu_scripts;

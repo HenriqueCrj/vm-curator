@@ -34,8 +34,8 @@ fn path_to_str(path: &Path) -> Result<&str> {
 pub struct LaunchOptions {
     pub boot_mode: BootMode,
     pub extra_args: Vec<String>,
-    /// USB passthrough is managed by writing the VM's launch script. Runtime USB
-    /// launch options are ignored to avoid passing QEMU flags as script options.
+    /// USB passthrough is persisted in the VM's launch script. Runtime devices
+    /// are ignored so QEMU flags are not passed to the script as shell options.
     pub usb_devices: Vec<UsbPassthrough>,
     pub window_size: Option<WindowSize>,
 }
@@ -101,12 +101,50 @@ pub struct UsbPassthrough {
     pub vendor_id: u16,
     pub product_id: u16,
     pub usb_version: UsbVersion,
+    /// Firmware boot priority (lower boots first); None leaves boot order alone
+    pub bootindex: Option<u32>,
 }
 
 impl UsbPassthrough {
     /// Check if this device is USB 3.0 or higher
     pub fn is_usb3(&self) -> bool {
         self.usb_version.is_usb3()
+    }
+}
+
+/// A physical disk passed through to the guest (whole block device)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskPassthrough {
+    /// Device path, preferably a stable /dev/disk/by-id link
+    pub path: String,
+    /// Firmware boot priority (lower boots first); None leaves boot order alone
+    pub bootindex: Option<u32>,
+}
+
+/// Fail fast when the VM uses a bridge network whose bridge does not exist.
+fn check_bridge_exists(vm: &DiscoveredVm) -> Result<(), String> {
+    use crate::vm::qemu_config::NetworkBackend;
+    let Some(network) = &vm.config.network else {
+        return Ok(());
+    };
+    let NetworkBackend::Bridge(bridge) = &network.backend else {
+        return Ok(());
+    };
+    if std::path::Path::new("/sys/class/net").join(bridge).exists() {
+        return Ok(());
+    }
+    if bridge.starts_with(crate::vnet::BRIDGE_PREFIX) {
+        Err(format!(
+            "Managed network bridge '{}' is not running.\n\
+             Start it from the Networks screen ([n] on the main menu) and try again.",
+            bridge
+        ))
+    } else {
+        Err(format!(
+            "Bridge '{}' does not exist on the host. Create it (or pick another \
+             network backend in Network Settings) and try again.",
+            bridge
+        ))
     }
 }
 
@@ -213,6 +251,21 @@ fn build_launch_invocation(
 /// If the process exits with an error within the monitoring window, we capture it.
 pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) -> LaunchResult {
     let vm_name = vm.display_name();
+
+    // Preflight: a bridge backend needs its bridge to exist NOW, otherwise
+    // QEMU fails with a cryptic bridge-helper error. Managed networks
+    // (issue #53) get a pointer to the Networks screen.
+    if let Err(error) = check_bridge_exists(vm) {
+        return LaunchResult {
+            success: false,
+            error: Some(error),
+            vm_name,
+        };
+    }
+
+    if let Err(e) = ensure_qmp_in_script(&vm.path) {
+        log::warn!("launch_vm_with_error_check: could not patch QMP into launch.sh: {e}");
+    }
 
     let invocation = match build_launch_invocation(vm, options) {
         Ok(invocation) => invocation,
@@ -358,9 +411,6 @@ pub fn launch_vm_with_error_check(vm: &DiscoveredVm, options: &LaunchOptions) ->
 
 /// Launch a VM synchronously (legacy function for compatibility)
 pub fn launch_vm_sync(vm: &DiscoveredVm, options: &LaunchOptions) -> Result<()> {
-    if let Err(e) = ensure_qmp_in_script(&vm.path) {
-        log::warn!("launch_vm_sync: could not patch QMP into launch.sh: {e}");
-    }
     let result = launch_vm_with_error_check(vm, options);
 
     if result.success {
@@ -474,6 +524,14 @@ pub fn reset_vm(vm: &DiscoveredVm) -> Result<()> {
         .config
         .primary_disk()
         .context("VM has no disk configured")?;
+
+    if disk.is_physical_device() {
+        bail!(
+            "Cannot reset a physical passthrough disk ({}). \
+             Resetting would destroy data on the host device.",
+            disk.path.display()
+        );
+    }
 
     let disk_path = &disk.path;
 
@@ -745,6 +803,9 @@ fn generate_usb_section(devices: &[UsbPassthrough]) -> String {
                 device.vendor_id, device.product_id
             ));
         }
+        if let Some(bootindex) = device.bootindex {
+            section.push_str(&format!(",bootindex={}", bootindex));
+        }
     }
 
     section.push_str("\"\n");
@@ -893,10 +954,16 @@ fn parse_usb_section(content: &str) -> Vec<UsbPassthrough> {
                         } else {
                             UsbVersion::Usb2
                         };
+                        let bootindex = part.split("bootindex=").nth(1).and_then(|rest| {
+                            let digits: String =
+                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            digits.parse::<u32>().ok()
+                        });
                         devices.push(UsbPassthrough {
                             vendor_id: vid,
                             product_id: pid,
                             usb_version,
+                            bootindex,
                         });
                     }
                 }
@@ -920,6 +987,164 @@ fn extract_hex_value(s: &str, prefix: &str) -> Option<u16> {
     let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
 
     u16::from_str_radix(hex_str, 16).ok()
+}
+
+// Disk Passthrough configuration markers
+const DISK_PASSTHROUGH_MARKER_START: &str = "# >>> Disk Passthrough (managed by vm-curator) >>>";
+const DISK_PASSTHROUGH_MARKER_END: &str = "# <<< Disk Passthrough <<<";
+
+/// Save physical disk passthrough configuration to the VM's launch.sh
+pub fn save_disk_passthrough(vm: &DiscoveredVm, disks: &[DiskPassthrough]) -> Result<()> {
+    let script_path = &vm.launch_script;
+    let content = std::fs::read_to_string(script_path).context("Failed to read launch.sh")?;
+
+    let content = remove_disk_passthrough_section(&content);
+    let section = generate_disk_passthrough_section(disks);
+    let new_content = insert_args_section(&content, &section, "$DISK_PASSTHROUGH_ARGS");
+
+    std::fs::write(script_path, new_content).context("Failed to write launch.sh")?;
+    Ok(())
+}
+
+/// Load physical disk passthrough configuration from the VM's launch.sh
+pub fn load_disk_passthrough(vm: &DiscoveredVm) -> Vec<DiskPassthrough> {
+    let script_path = &vm.launch_script;
+    match std::fs::read_to_string(script_path) {
+        Ok(content) => parse_disk_passthrough_section(&content),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn remove_disk_passthrough_section(content: &str) -> String {
+    let mut result = String::new();
+    let mut in_section = false;
+
+    for line in content.lines() {
+        if line.trim() == DISK_PASSTHROUGH_MARKER_START {
+            in_section = true;
+            continue;
+        }
+        if line.trim() == DISK_PASSTHROUGH_MARKER_END {
+            in_section = false;
+            continue;
+        }
+        if !in_section {
+            let cleaned = line
+                .replace(" $DISK_PASSTHROUGH_ARGS", "")
+                .replace("$DISK_PASSTHROUGH_ARGS ", "")
+                .replace("$DISK_PASSTHROUGH_ARGS", "");
+            result.push_str(&cleaned);
+            result.push('\n');
+        }
+    }
+
+    while result.ends_with("\n\n") {
+        result.pop();
+    }
+
+    result
+}
+
+fn generate_disk_passthrough_section(disks: &[DiskPassthrough]) -> String {
+    if disks.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::new();
+    section.push_str(DISK_PASSTHROUGH_MARKER_START);
+    section.push('\n');
+    section.push_str(
+        "# WARNING: passes the raw physical disks below to the guest — all data on them\n\
+         # is writable by the VM\n",
+    );
+
+    // Preflight: refuse to start if a disk is missing, inaccessible, or mounted
+    section.push_str("for _pdisk in");
+    for disk in disks {
+        section.push_str(&format!(" '{}'", disk.path));
+    }
+    section.push_str("; do\n");
+    section.push_str(
+        "    if [[ ! -b \"$_pdisk\" ]]; then\n\
+         \x20       echo \"Error: passthrough disk not found: $_pdisk\"; exit 1\n\
+         \x20   fi\n\
+         \x20   if [[ ! -r \"$_pdisk\" || ! -w \"$_pdisk\" ]]; then\n\
+         \x20       echo \"Error: no read/write access to $_pdisk\"\n\
+         \x20       echo \"Fix (pick one):\"\n\
+         \x20       echo \"  sudo usermod -aG disk $USER   # then log out and back in\"\n\
+         \x20       echo \"  or add a udev rule granting your user access to this disk\"\n\
+         \x20       exit 1\n\
+         \x20   fi\n\
+         \x20   if command -v lsblk >/dev/null 2>&1 \\\n\
+         \x20      && lsblk -no MOUNTPOINTS \"$(readlink -f \"$_pdisk\")\" 2>/dev/null | grep -q .; then\n\
+         \x20       echo \"Error: $_pdisk has mounted partitions; unmount them first\"; exit 1\n\
+         \x20   fi\n\
+         done\n",
+    );
+
+    section.push_str("DISK_PASSTHROUGH_ARGS=\"");
+    for (i, disk) in disks.iter().enumerate() {
+        if i > 0 {
+            section.push(' ');
+        }
+        section.push_str(&format!(
+            "-drive file={},format=raw,if=none,id=pdisk{},cache=none -device virtio-blk-pci,drive=pdisk{}",
+            disk.path, i, i
+        ));
+        if let Some(bootindex) = disk.bootindex {
+            section.push_str(&format!(",bootindex={}", bootindex));
+        }
+    }
+    // Let the firmware offer a boot menu so passthrough disks can be chosen
+    section.push_str(" -boot menu=on");
+    section.push_str("\"\n");
+    section.push_str(DISK_PASSTHROUGH_MARKER_END);
+    section.push('\n');
+
+    section
+}
+
+fn parse_disk_passthrough_section(content: &str) -> Vec<DiskPassthrough> {
+    let mut disks = Vec::new();
+    let mut in_section = false;
+
+    for line in content.lines() {
+        if line.trim() == DISK_PASSTHROUGH_MARKER_START {
+            in_section = true;
+            continue;
+        }
+        if line.trim() == DISK_PASSTHROUGH_MARKER_END {
+            in_section = false;
+            continue;
+        }
+        if in_section && line.contains("DISK_PASSTHROUGH_ARGS=") {
+            // Paths come from "-drive file=<path>,..."; bootindex (if any) from
+            // the paired "-device virtio-blk-pci,drive=pdiskN[,bootindex=N]".
+            // Drives and devices are emitted in the same order, so zip by index.
+            let mut paths = Vec::new();
+            for part in line.split("-drive file=").skip(1) {
+                if let Some(path) = part.split(',').next() {
+                    paths.push(path.to_string());
+                }
+            }
+            let mut bootindexes = Vec::new();
+            for part in line.split("-device virtio-blk-pci,").skip(1) {
+                let bootindex = part.split("bootindex=").nth(1).and_then(|rest| {
+                    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    digits.parse::<u32>().ok()
+                });
+                bootindexes.push(bootindex);
+            }
+            for (i, path) in paths.into_iter().enumerate() {
+                disks.push(DiskPassthrough {
+                    path,
+                    bootindex: bootindexes.get(i).copied().flatten(),
+                });
+            }
+        }
+    }
+
+    disks
 }
 
 // Shared Folders section markers
@@ -1756,7 +1981,7 @@ fn ensure_window_size_override_in_script(script_path: &Path) -> Result<()> {
 // but not yet surfaced in the UI — intentional, not dead.
 
 #[allow(dead_code)]
-const QMP_ARG: &str = "        -qmp unix:$VM_DIR/qemu.sock,server=on,wait=off";
+const QMP_ARG: &str = "        -qmp unix:\"$VM_DIR/qemu.sock\",server=on,wait=off";
 
 /// Patch an existing launch.sh to include a QMP socket if not already present.
 /// Idempotent — safe to call before every launch.
@@ -1765,6 +1990,14 @@ pub fn ensure_qmp_in_script(vm_path: &Path) -> Result<()> {
     let script_path = vm_path.join("launch.sh");
     let content =
         std::fs::read_to_string(&script_path).context("Failed to read launch.sh for QMP patch")?;
+
+    // Repair the unquoted socket path written by v1.0.0–v1.2.1 (issue #65):
+    // without quotes, a library path containing spaces word-splits the -qmp arg.
+    if content.contains("unix:$VM_DIR/qemu.sock") {
+        let fixed = content.replace("unix:$VM_DIR/qemu.sock", "unix:\"$VM_DIR/qemu.sock\"");
+        std::fs::write(&script_path, fixed).context("Failed to write repaired launch.sh")?;
+        return Ok(());
+    }
 
     if content.contains("qemu.sock") {
         return Ok(());

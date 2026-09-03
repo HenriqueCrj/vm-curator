@@ -13,6 +13,7 @@ mod hardware;
 mod metadata;
 mod ui;
 mod vm;
+mod vnet;
 mod wizard_types;
 
 use anyhow::{Context, Result};
@@ -106,9 +107,13 @@ fn main() -> Result<()> {
     // Load configuration
     let mut config = Config::load()?;
 
-    // Override library path if provided
+    // Override library path if provided. A relative CLI path is resolved
+    // against the current directory now, so later cwd changes (VM launching
+    // sets cwd to the VM dir) can't break it (#79).
     if let Some(ref library) = cli.library {
-        config.vm_library_path = library.clone();
+        config.vm_library_path = std::env::current_dir()
+            .map(|cwd| cwd.join(library))
+            .unwrap_or_else(|_| library.clone());
     }
 
     // Check if VM library exists, prompt for setup if not
@@ -160,21 +165,11 @@ fn prompt_vm_library_setup(mut config: Config) -> Result<Config> {
     io::stdin().read_line(&mut input)?;
     let input = input.trim();
 
-    // Use input if provided, otherwise keep default
+    // Use input if provided, otherwise keep default. Expands ~ and anchors
+    // bare relative paths (e.g. "VMs") at home so the stored path is always
+    // absolute (#79).
     if !input.is_empty() {
-        // Expand ~ to home directory
-        let expanded = if let Some(rest) = input.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() {
-                home.join(rest)
-            } else {
-                PathBuf::from(input)
-            }
-        } else if input == "~" {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from(input))
-        } else {
-            PathBuf::from(input)
-        };
-        config.vm_library_path = expanded;
+        config.vm_library_path = config::expand_user_path(input);
     }
 
     // Create the directory

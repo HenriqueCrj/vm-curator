@@ -1,7 +1,10 @@
+pub mod block;
 pub mod multi_gpu;
 pub mod pci;
 pub mod single_gpu;
 pub mod usb;
+
+pub use block::{enumerate_block_devices, BlockDevice};
 
 pub use multi_gpu::LookingGlassConfig;
 pub use pci::{

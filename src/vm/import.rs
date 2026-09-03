@@ -779,7 +779,7 @@ pub fn execute_import(
 
     let script_content = generate_launch_script_with_os(
         vm_name,
-        primary_disk,
+        primary_disk.as_str(),
         None,
         false,
         &vm.qemu_config,

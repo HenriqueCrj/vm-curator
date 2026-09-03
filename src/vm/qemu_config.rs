@@ -227,12 +227,33 @@ impl DiskFormat {
     }
 }
 
+/// Role a parsed drive plays in the VM
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DiskRole {
+    /// Bootable system disk (image file or physical block device)
+    #[default]
+    System,
+    /// Firmware image (pflash / OVMF)
+    Firmware,
+    /// Removable media attachment (cdrom, recovery image)
+    Media,
+}
+
 /// Disk configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskConfig {
     pub path: PathBuf,
     pub format: DiskFormat,
     pub interface: String,
+    #[serde(default)]
+    pub role: DiskRole,
+}
+
+impl DiskConfig {
+    /// True for raw block devices passed through from the host (/dev/...)
+    pub fn is_physical_device(&self) -> bool {
+        self.path.starts_with("/dev")
+    }
 }
 
 /// Boot mode
@@ -294,19 +315,22 @@ impl Default for QemuConfig {
 }
 
 impl QemuConfig {
-    /// Check if this VM supports snapshots (qcow2 disks)
+    /// Check if this VM supports snapshots (qcow2 system disks).
+    /// Firmware (pflash/OVMF) and media drives are excluded: on distros that
+    /// ship qcow2 OVMF images the firmware must never count as snapshotable.
     pub fn supports_snapshots(&self) -> bool {
-        self.disks.iter().any(|d| d.format.supports_snapshots())
+        self.disks
+            .iter()
+            .any(|d| d.role == DiskRole::System && d.format.supports_snapshots())
     }
 
-    /// Get the primary disk for snapshot operations
-    /// Returns the first disk that supports snapshots (qcow2), skipping
-    /// pflash/OVMF firmware files that are not snapshotable.
+    /// Get the primary disk for snapshot/reset operations.
+    /// Only System-role disks qualify — never pflash firmware or cdrom media.
     pub fn primary_disk(&self) -> Option<&DiskConfig> {
         self.disks
             .iter()
-            .find(|d| d.format.supports_snapshots())
-            .or_else(|| self.disks.first())
+            .find(|d| d.role == DiskRole::System && d.format.supports_snapshots())
+            .or_else(|| self.disks.iter().find(|d| d.role == DiskRole::System))
     }
 
     /// Whether para-virtualized 3D acceleration is currently enabled.

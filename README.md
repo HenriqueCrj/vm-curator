@@ -1,58 +1,25 @@
 # vm-curator
 
-A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — with 3D acceleration, GPU passthrough, VM import, and 120+ pre-configured OS profiles!
+A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — with 3D acceleration, GPU and physical-disk passthrough, managed virtual networks, VM import, and 130+ pre-configured OS profiles!
 
 ### Changelog
 
-**v1.2.0**
-- **Fix Windows 11 TPM 2.0 Detection on Fedora** (#42): Windows 11 installs no longer fail the "PC must support TPM 2.0" check on Fedora — OVMF firmware is now selected as a matched CODE+VARS pair, preferring 4M builds (including qcow2-format firmware), with the pflash `format=` emitted to match
-- **GPU vBIOS ROM support for Single-GPU Passthrough** (#44): Point the Single GPU Setup screen at a vBIOS ROM (`[r]` to set, `[R]` to clear) so the GPU is passed with `romfile=…` — commonly needed for AMD cards that otherwise output no video after the host POSTs them
-- **Fix Single-GPU Passthrough Script Bugs on AMD + NVIDIA** (#58): The generated script no longer tries to bind infrastructure devices (e.g. the host bridge sharing the GPU's IOMMU group) to `vfio-pci`, and now strips emulated graphics devices (`virtio-vga-gl`, `qxl`, etc.) that made QEMU abort under `-vga none`
-- **Warn Before Discarding Passthrough / Shared-Folder Changes** (#52): Leaving the USB Passthrough, PCI Passthrough, or Shared Folders screens with unsaved changes now prompts **Save / Discard / Cancel** instead of silently dropping them; `Space` toggles and `Enter`/`s` saves
-- **Security: bump `quick-xml` to 0.41** (RUSTSEC-2026-0194/0195): resolves two high-severity advisories in the libvirt-XML import parser; also bumps `anyhow` to 1.0.103
+**v1.4.0**
+- **Physical Disk Passthrough as Boot Device** (#80): Pass whole NVMe/SATA/USB disks straight through to guests — a new **Physical Disk** mode in the creation wizard (with a safety-filtered picker that excludes the host system disk, mounted disks, and LVM/swap members) and a **Passthrough Disks** management screen for existing VMs, with per-disk boot index; USB passthrough gains a boot-index option too. Also fixes a latent bug where Fedora's qcow2 OVMF firmware could be mistaken for the VM's disk — letting Reset VM delete it
+- **Virtual Network Manager** (#53): Create, edit, start/stop, and delete managed **NAT** or **Isolated** (host-only) networks from the new Networks screen (`n`), with configurable subnets and built-in DHCP — ideal for multi-VM labs. Host changes run only via inspectable generated `net-up.sh`/`net-down.sh` scripts with explicit sudo; managed networks appear in the per-VM bridge picker, and launching against a stopped network gives a clear error
+- **Homebrew Tap** (#77): `brew install mroboff/tap/vm-curator` — for atomic distros like Bluefin/Silverblue; the formula tracks releases automatically
+- **Fix Relative VM Library Paths** (#79): Entering a relative path (e.g. `VMs`) at setup made discovery cwd-dependent and broke launching entirely; paths are now anchored at home, and existing configs self-heal on load
 
-**v1.1.0**
-- **SPICE Clipboard Sharing** (#41): VMs using the `spice-app` display now get bidirectional host ⇄ guest copy/paste out of the box — vm-curator now emits the SPICE guest-agent channel that `spice-vdagent` needs (requires `spice-vdagent` installed in the guest)
-- **Fix `-qmp` Crash in Single-GPU Passthrough** (#48): Single-GPU passthrough VMs no longer fail to launch with `-qmp -device: '-device' is not a valid char driver`; the QMP socket value was being dropped when appending passthrough args, leaving `-qmp` dangling
-- **Fix Stray AppImage Release Asset** (#46): Release uploads now publish only `vm-curator-*.AppImage` instead of also shipping the bundled `appimagetool` AppImage
+**v1.3.0**
+- **Configurable VM Window Size** (thanks @HenriqueCrj, #67): New Settings entry sets the initial display resolution for launched VMs (`WIDTHxHEIGHT`, e.g. `1440x900`) — applied at runtime via an environment variable on scripts using standard VGA, virtio-vga, virtio-vga-gl, or QXL video; existing scripts are patched automatically, and hand-customized video setups are left alone
+- **Fix Shared Folders with Spaces in Paths** (thanks @HenriqueCrj, #66): The managed `SHARED_FOLDERS_ARGS` section is now a properly quoted bash array, so host paths containing spaces or quotes no longer break the launch script
+- **Fix USB Passthrough Launch Handling** (#66): Launching from the TUI no longer passes USB QEMU flags as shell options `launch.sh` can't parse — the USB section saved in the script is the single source of truth
+- **Fix UEFI Boot Delays from Stale NVRAM Entries** (#66): Normal UEFI boots now pin the disk first (`-boot strict=on` + virtio `bootindex=0`), so guests that once registered PXE/HTTP boot entries stop waiting on network boot every start
+- **Keep Management Screens Open When Saving Fails** (#66): A failed save from the USB/PCI/Shared Folders unsaved-changes prompt no longer closes the screen and discards your selections
 
-**v1.0.0**
-- **First stable release** — many thanks to [@indyfive11](https://github.com/indyfive11) for the library-API contributions below! Otherwise this release focuses on release-engineering and code-hardening; existing TUI behavior is unchanged.
-- **Library target for GUI consumers** (thanks @indyfive11, #39): new `[lib]` target re-exporting the business-logic modules (`commands`, `config`, `fs`, `hardware`, `metadata`, `vm`, `wizard_types`) for external front-ends, plus QMP VM control (pause/resume) and a D-Bus display launch path
-- **Detect immediate QEMU startup failures** (thanks @indyfive11, #40): `launch_vm_dbus` now catches a QEMU process that exits within milliseconds and surfaces its stderr, instead of returning a PID a GUI would wait on forever
-- **CI quality gates**: every push to `main` and PR now runs fmt, clippy (`-D warnings`), tests, and `cargo audit`; added `rust-toolchain.toml`, expanded test coverage, refactored the libvirt import parser, and added public-API docs
-
-**v0.4.10**
-- **First release with external contributions** — many thanks to [@Ibn-Hesham](https://github.com/Ibn-Hesham) and [@nextzard](https://github.com/nextzard) for the patches below!
-- **Nix Flake** (thanks @Ibn-Hesham, #32): Reproducible builds and dev shell via `nix build` / `nix develop` — flake exposes `packages.default`, `devShells.default`, and `apps.default`
-- **Fix Snapshots on UEFI VMs** (thanks @nextzard, #33 / #37): Snapshot operations now skip OVMF pflash entries when picking the primary disk; UEFI VMs can be snapshotted again instead of failing with `Permission denied` on `OVMF_CODE.fd`
-- **Fix Network-Settings Rewrite** (#36, #38): Editing a VM's network settings (model/backend/MAC) now preserves the network device in every boot branch of `launch.sh` and stops sweeping up adjacent args like `-usb` and `-rtc base=localtime`
-- **Fix Wizard Hidden-Row Navigation** (#31): VM creation wizard's QEMU step no longer lets keyboard arrows focus invisible network rows (e.g., when Network = `none` hides Backend/Bridge/Forwards/MAC)
-
-**v0.4.9**
-- **Fix Port-Forward Editor Rendering**: Create wizard's port-forward editor now actually draws a popup when activated (previously the handler was wired up but no UI was rendered)
-- **Fix Display Backend Parser**: Strip QEMU's trailing usage paragraph from `-display help` output so bogus tokens like "Some", "-display", and "For" no longer appear as selectable display backends in the wizard
-
-**v0.4.8**
-- **MAC Address Editing**: Set an explicit NIC MAC address or generate a random one (uses QEMU's `52:54:00` OUI prefix) from the create wizard and existing-VM network settings — also parsed from `launch.sh` on import
-- **Default ISO Path Setting**: ISO file browser seeds to a configurable directory instead of `$HOME`; set it from Settings or press `[d]` in the browser to use the current directory
-- **3D Acceleration Toggle**: New management menu item to toggle para-virtualized 3D (`virtio-vga-gl` + `gl=on`) on existing VMs, with automatic `gtk` → `sdl` display swap for better performance
-
-**v0.4.7**
-- **Windows Server Profiles**: Add 9 Windows Server OS profiles (2003, 2008, 2008 R2, 2012, 2012 R2, 2016, 2019, 2022, 2025) with QEMU configurations, metadata, and a new "Windows Server" subcategory under the Microsoft family
-
-**v0.4.6**
-- **Fix Multi-GPU Passthrough VFIO Binding**: Launch scripts now automatically bind PCI devices to `vfio-pci` before QEMU and restore original drivers on exit. Fixes `Could not open '/dev/vfio/N'` errors. Uses `pkexec`/`sudo` for authentication — only prompts when devices need rebinding.
-
-**v0.4.5**
-- **Fix Multi-GPU Passthrough State**: Multi-GPU Passthrough screen now correctly shows previously selected GPUs. Pressing 'p' from Multi-GPU to enter PCI Passthrough also loads saved selections.
-
-**v0.4.3**
-- **Floppy Disk Support**: Boot floppy image support for OSes that require a boot floppy for installation (e.g., OS/2). Browse for floppy images (.img, .ima, .flp, .vfd) in the create wizard and boot from floppy in the management screen.
-
-**v0.4.2**
-- **macOS Intel VM Support**: Comprehensive overhaul of macOS Intel profiles with Apple SMC emulation, AHCI disk, OpenCore bootloader integration, version-specific CPU models (Penryn/Skylake-Client), passt networking with vmxnet3, and spice-app display with vmware-svga
-- **QEMU Profile Audit**: Review and update of 40+ QEMU profiles against current OS compatibility research — fixes critical boot failures (Bazzite, Pop!_OS, OpenWrt), corrects VGA/network/audio defaults for BSD, Windows 9x, BeOS, Plan 9, and retro OSes, and bumps resource allocations for Proxmox, Tails, and Classic Mac profiles
+**v1.2.3**
+- **Hide-KVM Toggle for Single-GPU Passthrough** (#71): The hypervisor-hiding CPU flags (`kvm=off,hv_vendor_id=…`) previously emitted only for NVIDIA are now a per-VM toggle (`[h]` in the Single GPU Setup screen) that defaults **on for AMD too** — fixes Code 43 / black screen in Windows guests on modern AMD cards like the RX 9070 XT; regenerate scripts to apply
+- **Fix App Quitting When Typing 'q' in Settings** (#72): Editing a Settings value containing `q` (e.g. a path like `~/qemu-vms`) no longer quits the app — `q` still quits when just browsing
 
 [Full changelog](CHANGELOG.md)
 
@@ -60,7 +27,7 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 **VM Discovery & Organization**
 - Automatically scans your VM library for directories containing `launch.sh` scripts
-- Hierarchical organization by 16 OS families with emoji icons and 49 subcategories
+- Hierarchical organization by 16 OS families with emoji icons and 50 subcategories
 - Parses QEMU launch scripts to extract configuration (emulator, memory, CPU, VGA, audio, network, disks)
 - Smart categorization with configurable hierarchy patterns
 - Live process monitoring — shows running VMs with status indicators
@@ -68,11 +35,12 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 **VM Creation Wizard**
 - 5-step guided wizard for creating new VMs
-- 120+ pre-configured OS profiles with optimal QEMU settings (Windows, macOS, Linux, BSD, Unix, retro, and more)
+- 130+ pre-configured OS profiles with optimal QEMU settings (Windows, macOS, Linux, BSD, Unix, retro, and more)
 - Automatic UEFI firmware detection across Linux distributions (Arch, Debian, Fedora, NixOS, etc.)
 - ISO file browser for selecting installation media
 - Configurable disk size/format, memory, CPU cores, and QEMU options with direct text editing and size suffixes (e.g., "8GB")
 - Use existing disk images (copy or move) instead of creating new ones
+- Pass a whole physical disk (NVMe/SATA/USB) through as the boot device instead of using a disk image
 - Support for custom OS entries with user metadata
 
 **VM Import Wizard**
@@ -83,6 +51,7 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 **GPU Passthrough**
 - **Single-GPU passthrough**: Pass your only GPU to a VM (requires TTY, stops display manager)
+- **Guest driver compatibility**: Per-VM vBIOS ROM (`romfile=`) and Hide-KVM (`kvm=off`) options for AMD/NVIDIA Windows driver quirks
 - **Multi-GPU passthrough**: Pass a secondary GPU while keeping the primary for the host
 - **Looking Glass integration**: Near-zero latency display for multi-GPU setups with auto-launch support
 - **PCI passthrough screen**: Select PCI devices (GPUs, USB controllers, NVMe) for VM passthrough
@@ -98,11 +67,17 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 - Visual snapshot list with timestamps and sizes
 - Background operations with progress feedback
 
+**Physical Disk Passthrough**
+- Pass whole physical disks (NVMe, SATA/HDD, USB) through to guests as raw virtio-blk devices — at creation time (wizard "Physical Disk" mode) or on existing VMs (the "Passthrough Disks" management screen)
+- Safety-filtered disk picker: the host system disk, mounted disks, swap members, and LVM/LUKS/RAID members are excluded with the reason shown; selection requires an explicit typed confirmation
+- Stable `/dev/disk/by-id` device paths, per-disk firmware boot index, and launch-time preflight checks (device present, read/write access with fix hints, refuses mounted partitions)
+
 **Network Configuration**
 - Network backend selection: user/SLIRP (NAT), passt, bridge, or none
 - Port forwarding with presets for common services (SSH, RDP, HTTP, HTTPS, VNC)
 - Bridge networking with automatic bridge detection, status checklist, and setup guidance
 - Configurable network adapter models per VM
+- **Virtual Network Manager** (`n` on the main menu): create, edit, start/stop, and delete managed NAT or Isolated (host-only) networks with configurable subnets and built-in DHCP — ideal for multi-VM lab topologies. Host changes run via inspectable generated `net-up.sh`/`net-down.sh` scripts with explicit sudo
 
 **Shared Folders**
 - Share host directories with VMs using virtio-9p
@@ -122,6 +97,7 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 - USB device enumeration via libudev with sysfs fallback
 - xHCI USB 3.0 controller with 8 ports (supports up to 8 USB 2.0 + 8 USB 3.0 devices)
 - Persistent passthrough configuration
+- Optional per-device firmware boot index (`b`) — passed-through USB drives can be the boot device
 - Hub filtering and keyboard/mouse detection for passthrough validation
 
 **VM Notes**
@@ -137,7 +113,7 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 
 **Additional Features**
 - Vim-style navigation (j/k, arrows, mouse) with full clickable interface
-- Multiple boot modes (normal, install, custom ISO)
+- Multiple boot modes (normal, install, custom ISO, recovery image, floppy)
 - Dynamic display backend detection per emulator (GTK, SDL, SPICE-app, VNC)
 - Headless VM support (display=none) with process monitoring
 - Stop/force-stop VMs (ACPI poweroff or SIGKILL)
@@ -169,7 +145,7 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 │ │     > Ubuntu 24.04      │  │                                   │ │
 │ └─────────────────────────┘  └────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────────┤
-│ [Enter] Launch  [m] Manage  [c] Create  [s] Settings  [?] Help     │
+│ [Enter] Launch  [m] Manage  [c] Create  [n] Networks  [?] Help     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -182,6 +158,14 @@ A fast and friendly Rust TUI for managing desktop QEMU/KVM virtual machines — 
 paru -S vm-curator
 yay -S vm-curator
 ```
+
+**Homebrew (Linux, incl. atomic distros like Bluefin/Silverblue)**
+
+```bash
+brew install mroboff/tap/vm-curator
+```
+
+Installs the prebuilt x86_64 binary from [the tap](https://github.com/mroboff/homebrew-tap); QEMU itself is not bundled (see `brew info vm-curator`).
 
 **crates.io**
 
@@ -226,8 +210,10 @@ The binary will be at `target/release/vm-curator`.
 - **Build**: a recent Rust stable toolchain (see `rust-toolchain.toml`), libudev-dev (Debian/Ubuntu) or systemd-libs (Arch/Fedora)
 - **Optional**:
   - OVMF/edk2 — UEFI boot support (`edk2-ovmf` on Arch, `ovmf` on Debian/Ubuntu)
+  - swtpm — TPM 2.0 emulation (required for Windows 11 VMs)
   - virt-viewer — SPICE-app display backend
   - passt — passt network backend
+  - dnsmasq — DHCP for managed virtual networks (nftables or iptables for NAT/isolation)
   - Looking Glass client — multi-GPU passthrough display
   - polkit — bridge networking permissions
 
@@ -279,6 +265,7 @@ vm-curator emulators
 | `c` | Open VM creation wizard |
 | `i` | Open VM import wizard |
 | `s` | Open settings |
+| `n` | Virtual Network Manager |
 | `/` | Search/filter VMs |
 | `?` | Show help |
 | `PgUp/PgDn` | Scroll info panel |
@@ -291,22 +278,24 @@ vm-curator emulators
 |-----|--------|
 | `j/k` or `Down/Up` | Navigate menu |
 | `Enter` | Select menu option |
-| `e` | Edit launch script |
-| `u` | Configure USB passthrough |
+| `1`–`9` | Jump directly to a menu option |
+| `Esc` | Back |
 
 Management menu options:
 - Boot Options (normal, install, custom ISO)
 - Snapshots
 - USB Passthrough
 - PCI Passthrough
+- Passthrough Disks (whole physical disks)
 - Shared Folders
 - Network Settings
 - Multi-GPU Passthrough (if enabled)
 - Single GPU Passthrough (if enabled)
 - Change Display
+- 3D Acceleration toggle
 - Edit Notes
 - Rename VM
-- Stop VM / Force Stop
+- Stop VM
 - Reset VM (recreate disk)
 - Delete VM
 - Edit Raw Configuration
@@ -315,11 +304,11 @@ Management menu options:
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Next/previous field |
-| `Enter` | Select / Continue |
-| `n` | Next step |
-| `p` | Previous step |
-| `Esc` | Cancel wizard |
+| `j/k` or `Down/Up` | Navigate fields |
+| `←/→` | Adjust / toggle the focused field |
+| `Tab` | Edit the focused value as text (where supported) |
+| `Enter` | Continue to next step |
+| `Esc` | Previous step / cancel |
 
 ### Configuration
 
@@ -335,6 +324,8 @@ default_cpu_cores = 2
 default_disk_size_gb = 64
 default_display = "gtk"      # gtk, sdl, spice-app, vnc
 default_enable_kvm = true
+# default_iso_path = "/path/to/isos"   # Directory the ISO browser opens in (omit = home)
+# default_window_size = "1440x900"     # Initial VM window size (omit = VM default)
 
 # Behavior
 confirm_before_launch = true
@@ -374,7 +365,7 @@ The `launch.sh` script should invoke QEMU. VM Curator parses this script to extr
 
 ### OS Profiles
 
-The creation wizard includes 120+ pre-configured profiles organized into 16 OS families:
+The creation wizard includes 130+ pre-configured profiles organized into 16 OS families:
 
 **Microsoft**: DOS, Windows 1.x–3.x, Windows 95/98/ME, Windows NT/2000/XP/Vista, Windows 7/8/10/11, Server editions
 
@@ -438,14 +429,14 @@ facts = ["Fact 1", "Fact 2"]
 
 - **Runtime**: QEMU, qemu-img, libudev
 - **Build**: a recent Rust stable toolchain (see `rust-toolchain.toml`), libudev-dev (Debian/Ubuntu) or systemd-libs (Arch)
-- **Optional**: OVMF/edk2 (UEFI), virt-viewer (SPICE-app), passt (networking), Looking Glass client (multi-GPU), polkit (bridge networking)
+- **Optional**: OVMF/edk2 (UEFI), swtpm (Windows 11 TPM), virt-viewer (SPICE-app), passt (networking), dnsmasq + nftables/iptables (managed virtual networks), Looking Glass client (multi-GPU), polkit (bridge networking)
 
 ### Cross-Distribution Compatibility
 
-VM Curator automatically detects OVMF/UEFI firmware paths across Linux distributions:
+VM Curator automatically detects OVMF/UEFI firmware as matched CODE+VARS pairs (preferring 4M builds, including Fedora's qcow2-format firmware) across Linux distributions:
 - Arch Linux: `/usr/share/edk2/x64/OVMF_CODE.4m.fd`
-- Debian/Ubuntu: `/usr/share/OVMF/OVMF_CODE.fd`
-- Fedora/RHEL: `/usr/share/edk2/ovmf/OVMF_CODE.fd`
+- Debian/Ubuntu: `/usr/share/OVMF/OVMF_CODE_4M.fd`
+- Fedora/RHEL: `/usr/share/edk2/ovmf/OVMF_CODE_4M.qcow2`
 - NixOS: Multiple search paths supported
 - And more...
 

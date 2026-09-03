@@ -201,6 +201,20 @@ pub fn render(app: &App, frame: &mut Frame) {
             Span::styled(bridges_str, Style::default().fg(bridges_color)),
         ]));
 
+        // Managed networks (issue #53)
+        if !app.vnet_networks.is_empty() {
+            let managed = app
+                .vnet_networks
+                .iter()
+                .map(|n| n.describe())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(Line::from(vec![
+                Span::styled("  Managed nets:  ", Style::default().fg(Color::Yellow)),
+                Span::styled(managed, Style::default().fg(Color::Green)),
+            ]));
+        }
+
         // Setup guidance if incomplete
         if caps.bridge_helper_path.is_none()
             || !caps.bridge_helper_configured
@@ -578,7 +592,15 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> anyhow::Res
         .iter()
         .map(|(id, _)| id.to_string())
         .collect();
-    let system_bridges = app.network_caps.system_bridges.clone();
+    let mut system_bridges = app.network_caps.system_bridges.clone();
+    // Managed networks (issue #53) are valid attach targets even while down —
+    // their bridges appear once started from the Networks screen.
+    for net in &app.vnet_networks {
+        let bridge = net.bridge_name();
+        if !system_bridges.contains(&bridge) {
+            system_bridges.push(bridge);
+        }
+    }
     let show_pf = {
         let ns = app.network_settings_state.as_ref().unwrap();
         ns.backend == "user" || ns.backend == "passt"

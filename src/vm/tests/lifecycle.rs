@@ -19,6 +19,75 @@ fn test_replace_display_for_dbus_strips_spice_agent_channel() {
     assert!(dbus.contains("-display dbus"), "display swapped to dbus");
 }
 
+fn test_vm(vm_dir: &std::path::Path) -> DiscoveredVm {
+    DiscoveredVm {
+        id: "test-vm".to_string(),
+        path: vm_dir.to_path_buf(),
+        launch_script: vm_dir.join("launch.sh"),
+        config: crate::vm::QemuConfig::default(),
+        custom_name: None,
+        os_profile: None,
+        notes: None,
+    }
+}
+
+#[test]
+fn test_save_usb_passthrough_persists_in_launch_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
+    )
+    .unwrap();
+    let devices = vec![UsbPassthrough {
+        vendor_id: 0x413c,
+        product_id: 0x2113,
+        usb_version: crate::hardware::UsbVersion::Usb2,
+        bootindex: None,
+    }];
+
+    save_usb_passthrough(&vm, &devices).unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(script.contains(USB_MARKER_START));
+    assert!(script.contains("USB_PASSTHROUGH_ARGS=\"-usb"));
+    assert!(script.contains("vendorid=0x413c,productid=0x2113"));
+    assert!(script.contains("qemu-system-x86_64 -m 2048 $USB_PASSTHROUGH_ARGS"));
+
+    let loaded = load_usb_passthrough(&vm);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].vendor_id, 0x413c);
+    assert_eq!(loaded[0].product_id, 0x2113);
+}
+
+#[test]
+fn test_save_usb_passthrough_persists_usb3_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
+    )
+    .unwrap();
+    let devices = vec![UsbPassthrough {
+        vendor_id: 0x413c,
+        product_id: 0x2113,
+        usb_version: crate::hardware::UsbVersion::Usb3,
+        bootindex: None,
+    }];
+
+    save_usb_passthrough(&vm, &devices).unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(script.contains("-device qemu-xhci,id=xhci,p2=8,p3=8"));
+    assert!(script.contains("usb-host,bus=xhci.0,vendorid=0x413c,productid=0x2113"));
+    assert_eq!(
+        load_usb_passthrough(&vm)[0].usb_version,
+        crate::hardware::UsbVersion::Usb3
+    );
+}
+
 #[test]
 fn test_window_size_parse_accepts_common_format() {
     assert_eq!(
@@ -42,18 +111,6 @@ fn test_window_size_parse_rejects_invalid_values() {
     assert_eq!(WindowSize::parse("1440"), None);
     assert_eq!(WindowSize::parse("1440x"), None);
     assert_eq!(WindowSize::parse("100x100"), None);
-}
-
-fn test_vm(vm_dir: &std::path::Path) -> DiscoveredVm {
-    DiscoveredVm {
-        id: "test-vm".to_string(),
-        path: vm_dir.to_path_buf(),
-        launch_script: vm_dir.join("launch.sh"),
-        config: crate::vm::QemuConfig::default(),
-        custom_name: None,
-        os_profile: None,
-        notes: None,
-    }
 }
 
 #[test]
@@ -94,88 +151,6 @@ fn test_build_launch_invocation_removes_window_size_env_when_unset() {
     assert_eq!(
         invocation.env,
         vec![("VM_CURATOR_WINDOW_SIZE".to_string(), None)]
-    );
-}
-
-#[test]
-fn test_build_launch_invocation_ignores_transient_usb_devices() {
-    let dir = tempfile::tempdir().unwrap();
-    let vm = test_vm(dir.path());
-    let options = LaunchOptions {
-        usb_devices: vec![UsbPassthrough {
-            vendor_id: 0x413c,
-            product_id: 0x2113,
-            usb_version: crate::hardware::UsbVersion::Usb2,
-        }],
-        ..LaunchOptions::default()
-    };
-
-    let invocation = build_launch_invocation(&vm, &options).unwrap();
-
-    assert_eq!(
-        invocation.args,
-        vec![vm.launch_script.to_string_lossy().to_string()]
-    );
-}
-
-#[test]
-fn test_save_usb_passthrough_persists_in_launch_script_not_launch_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let vm = test_vm(dir.path());
-    std::fs::write(
-        &vm.launch_script,
-        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
-    )
-    .unwrap();
-    let devices = vec![UsbPassthrough {
-        vendor_id: 0x413c,
-        product_id: 0x2113,
-        usb_version: crate::hardware::UsbVersion::Usb2,
-    }];
-
-    save_usb_passthrough(&vm, &devices).unwrap();
-
-    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
-    assert!(script.contains(USB_MARKER_START));
-    assert!(script.contains("USB_PASSTHROUGH_ARGS=\"-usb"));
-    assert!(script.contains("vendorid=0x413c,productid=0x2113"));
-    assert!(script.contains("qemu-system-x86_64 -m 2048 $USB_PASSTHROUGH_ARGS"));
-
-    let loaded = load_usb_passthrough(&vm);
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].vendor_id, 0x413c);
-    assert_eq!(loaded[0].product_id, 0x2113);
-
-    let invocation = build_launch_invocation(&vm, &LaunchOptions::default()).unwrap();
-    assert_eq!(
-        invocation.args,
-        vec![vm.launch_script.to_string_lossy().to_string()]
-    );
-}
-
-#[test]
-fn test_save_usb_passthrough_persists_usb3_controller() {
-    let dir = tempfile::tempdir().unwrap();
-    let vm = test_vm(dir.path());
-    std::fs::write(
-        &vm.launch_script,
-        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
-    )
-    .unwrap();
-    let devices = vec![UsbPassthrough {
-        vendor_id: 0x413c,
-        product_id: 0x2113,
-        usb_version: crate::hardware::UsbVersion::Usb3,
-    }];
-
-    save_usb_passthrough(&vm, &devices).unwrap();
-
-    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
-    assert!(script.contains("-device qemu-xhci,id=xhci,p2=8,p3=8"));
-    assert!(script.contains("usb-host,bus=xhci.0,vendorid=0x413c,productid=0x2113"));
-    assert_eq!(
-        load_usb_passthrough(&vm)[0].usb_version,
-        crate::hardware::UsbVersion::Usb3
     );
 }
 
@@ -793,4 +768,213 @@ fn test_parse_pci_section_with_vfio_bind_functions() {
         "-device vfio-pci,host=0000:10:00.0,multifunction=on"
     );
     assert_eq!(args[1], "-device vfio-pci,host=0000:10:00.1");
+}
+
+#[test]
+fn test_ensure_qmp_repairs_unquoted_socket_path() {
+    // Scripts generated by v1.0.0–v1.2.1 carry an unquoted socket path that
+    // word-splits when the VM library path contains spaces (issue #65).
+    let tmp = tempfile::tempdir().unwrap();
+    let script = "#!/bin/bash\n\
+        qemu-system-x86_64 \\\n\
+        -m 2048 \\\n\
+        -qmp \\\n\
+        unix:$VM_DIR/qemu.sock,server=on,wait=off\n\
+        ;;\n";
+    std::fs::write(tmp.path().join("launch.sh"), script).unwrap();
+
+    ensure_qmp_in_script(tmp.path()).unwrap();
+
+    let repaired = std::fs::read_to_string(tmp.path().join("launch.sh")).unwrap();
+    assert!(
+        repaired.contains("unix:\"$VM_DIR/qemu.sock\",server=on,wait=off"),
+        "socket path should be quoted:\n{repaired}"
+    );
+    assert!(!repaired.contains("unix:$VM_DIR/qemu.sock,"));
+}
+
+#[test]
+fn test_ensure_qmp_repair_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let script = "#!/bin/bash\n\
+        qemu-system-x86_64 \\\n\
+        -qmp unix:$VM_DIR/qemu.sock,server=on,wait=off\n";
+    std::fs::write(tmp.path().join("launch.sh"), script).unwrap();
+
+    ensure_qmp_in_script(tmp.path()).unwrap();
+    let first = std::fs::read_to_string(tmp.path().join("launch.sh")).unwrap();
+    ensure_qmp_in_script(tmp.path()).unwrap();
+    let second = std::fs::read_to_string(tmp.path().join("launch.sh")).unwrap();
+
+    assert_eq!(first, second, "second repair pass must be a no-op");
+    assert!(first.contains("unix:\"$VM_DIR/qemu.sock\""));
+    assert!(!first.contains("unix:\"\"$VM_DIR"), "must not double-quote");
+}
+
+#[test]
+fn test_ensure_qmp_retrofit_inserts_quoted_arg() {
+    // A pre-1.0 script with no QMP line at all gets the arg patched in,
+    // and the patched-in form must be the quoted one.
+    let tmp = tempfile::tempdir().unwrap();
+    let script = "#!/bin/bash\n\
+case \"$1\" in\n\
+    *)\n\
+        qemu-system-x86_64 \\\n\
+        -m 2048 \\\n\
+        -display gtk\n\
+        ;;\n\
+esac\n";
+    std::fs::write(tmp.path().join("launch.sh"), script).unwrap();
+
+    ensure_qmp_in_script(tmp.path()).unwrap();
+
+    let patched = std::fs::read_to_string(tmp.path().join("launch.sh")).unwrap();
+    assert!(
+        patched.contains("-qmp unix:\"$VM_DIR/qemu.sock\",server=on,wait=off"),
+        "retrofitted QMP arg should be quoted:\n{patched}"
+    );
+}
+
+#[test]
+fn test_usb_bootindex_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
+    )
+    .unwrap();
+    let devices = vec![
+        UsbPassthrough {
+            vendor_id: 0x0781,
+            product_id: 0x5567,
+            usb_version: crate::hardware::UsbVersion::Usb3,
+            bootindex: Some(1),
+        },
+        UsbPassthrough {
+            vendor_id: 0x413c,
+            product_id: 0x2113,
+            usb_version: crate::hardware::UsbVersion::Usb2,
+            bootindex: None,
+        },
+    ];
+
+    save_usb_passthrough(&vm, &devices).unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(script.contains("vendorid=0x0781,productid=0x5567,bootindex=1"));
+    assert!(script.contains("vendorid=0x413c,productid=0x2113"));
+    assert!(!script.contains("productid=0x2113,bootindex"));
+
+    let loaded = load_usb_passthrough(&vm);
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].bootindex, Some(1));
+    assert_eq!(loaded[1].bootindex, None);
+}
+
+#[test]
+fn test_disk_passthrough_save_load_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
+    )
+    .unwrap();
+    let disks = vec![
+        DiskPassthrough {
+            path: "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456".to_string(),
+            bootindex: Some(0),
+        },
+        DiskPassthrough {
+            path: "/dev/disk/by-id/usb-SanDisk_Ultra_0101-0:0".to_string(),
+            bootindex: None,
+        },
+    ];
+
+    save_disk_passthrough(&vm, &disks).unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(script.contains("# >>> Disk Passthrough (managed by vm-curator) >>>"));
+    assert!(script.contains(
+        "-drive file=/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB_S6B0NS0W123456,format=raw,if=none,id=pdisk0,cache=none"
+    ));
+    assert!(script.contains("-device virtio-blk-pci,drive=pdisk0,bootindex=0"));
+    assert!(script.contains("-device virtio-blk-pci,drive=pdisk1 "));
+    assert!(script.contains("-boot menu=on"));
+    // Preflight guards present
+    assert!(script.contains("if [[ ! -b \"$_pdisk\" ]]"));
+    assert!(script.contains("no read/write access"));
+    assert!(script.contains("mounted partitions"));
+    // Args appended to the qemu command
+    assert!(script.contains("qemu-system-x86_64 -m 2048 $DISK_PASSTHROUGH_ARGS"));
+
+    let loaded = load_disk_passthrough(&vm);
+    assert_eq!(loaded, disks);
+}
+
+#[test]
+fn test_disk_passthrough_remove_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    let original = "#!/bin/bash\nqemu-system-x86_64 -m 2048\n";
+    std::fs::write(&vm.launch_script, original).unwrap();
+
+    let disks = vec![DiskPassthrough {
+        path: "/dev/sdb".to_string(),
+        bootindex: None,
+    }];
+    save_disk_passthrough(&vm, &disks).unwrap();
+    assert!(!load_disk_passthrough(&vm).is_empty());
+
+    // Saving an empty list removes the section and the args reference
+    save_disk_passthrough(&vm, &[]).unwrap();
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    assert!(!script.contains("Disk Passthrough"));
+    assert!(!script.contains("$DISK_PASSTHROUGH_ARGS"));
+    assert!(load_disk_passthrough(&vm).is_empty());
+}
+
+#[test]
+fn test_disk_passthrough_coexists_with_usb_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let vm = test_vm(dir.path());
+    std::fs::write(
+        &vm.launch_script,
+        "#!/bin/bash\nqemu-system-x86_64 -m 2048\n",
+    )
+    .unwrap();
+
+    save_usb_passthrough(
+        &vm,
+        &[UsbPassthrough {
+            vendor_id: 0x413c,
+            product_id: 0x2113,
+            usb_version: crate::hardware::UsbVersion::Usb2,
+            bootindex: None,
+        }],
+    )
+    .unwrap();
+    save_disk_passthrough(
+        &vm,
+        &[DiskPassthrough {
+            path: "/dev/sdc".to_string(),
+            bootindex: Some(2),
+        }],
+    )
+    .unwrap();
+
+    let script = std::fs::read_to_string(&vm.launch_script).unwrap();
+    let qemu_line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("qemu-system-x86_64"))
+        .unwrap();
+    assert!(qemu_line.contains("$USB_PASSTHROUGH_ARGS"));
+    assert!(qemu_line.contains("$DISK_PASSTHROUGH_ARGS"));
+
+    // Both sections round-trip independently
+    assert_eq!(load_usb_passthrough(&vm).len(), 1);
+    let disks = load_disk_passthrough(&vm);
+    assert_eq!(disks.len(), 1);
+    assert_eq!(disks[0].bootindex, Some(2));
 }

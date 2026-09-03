@@ -88,6 +88,12 @@ pub enum Screen {
     ImportWizard,
     /// Notes editor
     EditNotes,
+    /// Physical block device picker (whole-disk passthrough)
+    PhysicalDiskPicker,
+    /// Passthrough disks management for an existing VM
+    DiskPassthrough,
+    /// Virtual Network Manager (managed NAT/Isolated networks, issue #53)
+    NetworkManager,
 }
 
 /// Context for text input dialogs
@@ -111,6 +117,20 @@ pub enum ConfirmAction {
     ForceStopVm,
     /// Leaving a passthrough/shared-folders screen with unsaved changes.
     UnsavedChanges(UnsavedKind),
+    /// Confirm passing a physical disk through to the guest (destructive).
+    UsePhysicalDisk,
+    /// Delete the selected managed virtual network (definition + scripts).
+    DeleteNetwork,
+}
+
+/// Who opened the physical disk picker (determines where the selection goes)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskPickerContext {
+    /// Creation wizard, disk step
+    #[default]
+    Wizard,
+    /// Passthrough Disks management screen for an existing VM
+    Management,
 }
 
 /// Which management screen has unsaved changes (see [`ConfirmAction::UnsavedChanges`]).
@@ -119,6 +139,7 @@ pub enum UnsavedKind {
     Usb,
     Pci,
     SharedFolders,
+    DiskPassthrough,
 }
 
 /// Input mode for text entry
@@ -176,6 +197,10 @@ pub struct App {
     pub selected_usb_devices: Vec<usize>,
     /// USB selection as it was on entry / last save, for unsaved-change detection
     pub usb_selection_baseline: Vec<usize>,
+    /// Firmware bootindex per USB device, keyed by (vendor_id, product_id)
+    pub usb_bootindexes: std::collections::HashMap<(u16, u16), u32>,
+    /// USB bootindexes as they were on entry / last save
+    pub usb_bootindex_baseline: std::collections::HashMap<(u16, u16), u32>,
     /// PCI devices (cached)
     pub pci_devices: Vec<PciDevice>,
     /// Selected PCI devices for passthrough
@@ -188,6 +213,24 @@ pub struct App {
     pub shared_folders_baseline: Vec<SharedFolder>,
     /// Selected shared folder index
     pub shared_folder_selected: usize,
+    /// Physical disk passthrough list for the current VM
+    pub disk_passthrough: Vec<crate::vm::DiskPassthrough>,
+    /// Disk passthrough list as it was on entry / last save
+    pub disk_passthrough_baseline: Vec<crate::vm::DiskPassthrough>,
+    /// Selected row in the Passthrough Disks screen
+    pub disk_passthrough_selected: usize,
+    /// Managed virtual networks (Networks screen)
+    pub vnet_networks: Vec<crate::vnet::VirtualNetwork>,
+    /// Selected row in the Networks screen
+    pub vnet_selected: usize,
+    /// Create/edit form state for the Networks screen
+    pub vnet_editor: Option<VNetEditorState>,
+    /// Physical block devices (cached for the disk picker)
+    pub block_devices: Vec<crate::hardware::BlockDevice>,
+    /// Selected row in the physical disk picker
+    pub block_device_selected: usize,
+    /// Who opened the physical disk picker
+    pub disk_picker_context: DiskPickerContext,
     /// Multi-GPU passthrough status (prerequisites)
     pub multi_gpu_status: Option<MultiGpuPassthroughStatus>,
     /// Selected management menu item
@@ -417,12 +460,23 @@ impl App {
             selected_snapshot: 0,
             usb_devices: Vec::new(),
             selected_usb_devices: Vec::new(),
+            vnet_networks: Vec::new(),
+            vnet_selected: 0,
+            vnet_editor: None,
+            block_devices: Vec::new(),
+            block_device_selected: 0,
+            disk_picker_context: DiskPickerContext::default(),
             usb_selection_baseline: Vec::new(),
+            usb_bootindexes: std::collections::HashMap::new(),
+            usb_bootindex_baseline: std::collections::HashMap::new(),
             pci_devices: Vec::new(),
             selected_pci_devices: Vec::new(),
             pci_selection_baseline: Vec::new(),
             shared_folders: Vec::new(),
             shared_folders_baseline: Vec::new(),
+            disk_passthrough: Vec::new(),
+            disk_passthrough_baseline: Vec::new(),
+            disk_passthrough_selected: 0,
             shared_folder_selected: 0,
             multi_gpu_status: None,
             selected_menu_item: 0,
@@ -666,6 +720,30 @@ impl App {
         Ok(())
     }
 
+    /// Load managed networks and open the Networks screen
+    pub fn open_network_manager(&mut self) {
+        self.reload_vnet_networks();
+        self.vnet_selected = 0;
+        self.vnet_editor = None;
+        self.push_screen(Screen::NetworkManager);
+    }
+
+    /// Re-read managed network definitions from disk
+    pub fn reload_vnet_networks(&mut self) {
+        self.vnet_networks = crate::vnet::load_networks(&crate::vnet::networks_dir());
+        if self.vnet_selected >= self.vnet_networks.len() {
+            self.vnet_selected = self.vnet_networks.len().saturating_sub(1);
+        }
+    }
+
+    /// Enumerate physical disks and open the picker screen
+    pub fn open_physical_disk_picker(&mut self, context: DiskPickerContext) {
+        self.disk_picker_context = context;
+        self.block_devices = crate::hardware::enumerate_block_devices().unwrap_or_default();
+        self.block_device_selected = 0;
+        self.push_screen(Screen::PhysicalDiskPicker);
+    }
+
     /// Toggle USB device selection
     pub fn toggle_usb_device(&mut self, index: usize) {
         if let Some(pos) = self.selected_usb_devices.iter().position(|&i| i == index) {
@@ -709,6 +787,7 @@ impl App {
     /// the user made during this visit (#52).
     pub fn snapshot_usb_baseline(&mut self) {
         self.usb_selection_baseline = self.selected_usb_devices.clone();
+        self.usb_bootindex_baseline = self.usb_bootindexes.clone();
     }
 
     /// Record the current PCI selection as the saved baseline.
@@ -730,7 +809,7 @@ impl App {
             self.selected_usb_devices.iter().copied().collect();
         let baseline: std::collections::BTreeSet<usize> =
             self.usb_selection_baseline.iter().copied().collect();
-        current != baseline
+        current != baseline || self.usb_bootindexes != self.usb_bootindex_baseline
     }
 
     /// True if the PCI selection changed since it was last entered or saved.
@@ -755,6 +834,26 @@ impl App {
             .map(|f| (f.host_path.as_str(), f.mount_tag.as_str()))
             .collect();
         current != baseline
+    }
+
+    /// Record the current disk passthrough list as the saved baseline.
+    pub fn snapshot_disk_passthrough_baseline(&mut self) {
+        self.disk_passthrough_baseline = self.disk_passthrough.clone();
+    }
+
+    /// True if the disk passthrough list changed since it was last entered or saved.
+    pub fn disk_passthrough_dirty(&self) -> bool {
+        self.disk_passthrough != self.disk_passthrough_baseline
+    }
+
+    /// Load the physical disk passthrough list for the current VM
+    pub fn load_disk_passthrough(&mut self) {
+        self.disk_passthrough.clear();
+        self.disk_passthrough_selected = 0;
+
+        if let Some(vm) = self.selected_vm() {
+            self.disk_passthrough = crate::vm::load_disk_passthrough(vm);
+        }
     }
 
     /// Load shared folders for the current VM
