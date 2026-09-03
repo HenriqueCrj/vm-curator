@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use std::path::PathBuf;
 
 use crate::app::{App, Screen};
 
@@ -22,6 +23,10 @@ pub fn render(app: &App, frame: &mut Frame) {
         return;
     };
 
+    render_disk_picker(disk_paths, *selected, frame);
+}
+
+fn render_disk_picker(disk_paths: &[PathBuf], selected: usize, frame: &mut Frame) {
     let area = frame.area();
     let dialog_width = 90.min(area.width.saturating_sub(4));
     let dialog_height = (disk_paths.len() as u16 + 8)
@@ -74,10 +79,67 @@ pub fn render(app: &App, frame: &mut Frame) {
             .add_modifier(Modifier::BOLD),
     );
     let mut state = ListState::default();
-    state.select(Some(*selected));
+    state.select(Some(selected));
     frame.render_stateful_widget(list, chunks[1], &mut state);
 
     let help = Paragraph::new("[j/k or ↑/↓] Navigate  [Enter] Select  [Esc] Cancel")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn picker_renders_exact_disk_paths_and_controls() {
+        let disk_paths = vec![
+            PathBuf::from("/vms/test-vm/os.raw"),
+            PathBuf::from("/vms/test-vm/data.qcow2"),
+        ];
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_disk_picker(&disk_paths, 1, frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Select Disk to Resize"));
+        assert!(rendered.contains("Disk 1  /vms/test-vm/os.raw"));
+        assert!(rendered.contains("Disk 2  /vms/test-vm/data.qcow2"));
+        assert!(rendered.contains("[Enter] Select"));
+        assert!(rendered.contains("[Esc] Cancel"));
+        assert!(buffer.content().iter().any(|cell| {
+            cell.fg == Color::Yellow
+                && cell.bg == Color::DarkGray
+                && cell.modifier.contains(Modifier::BOLD)
+        }));
+    }
+
+    #[test]
+    fn picker_handles_an_empty_disk_list_without_panicking() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_disk_picker(&[], 0, frame))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Select Disk to Resize"));
+        assert!(rendered.contains("[Esc] Cancel"));
+    }
 }

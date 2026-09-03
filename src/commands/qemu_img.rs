@@ -118,22 +118,36 @@ fn disk_image_info_with_runner(path: &Path, runner: &impl QemuImgRunner) -> Resu
 ///
 /// Shrinking is deliberately rejected because it can silently destroy guest data.
 pub fn resize_disk(path: &Path, new_size_gib: u64) -> Result<()> {
-    resize_disk_with_runner(path, new_size_gib, &SystemQemuImgRunner)
+    resize_disk_with_dependencies(path, new_size_gib, &SystemQemuImgRunner, |path| {
+        std::fs::metadata(path).map(|metadata| metadata.file_type().is_block_device())
+    })
 }
 
+#[cfg(test)]
 fn resize_disk_with_runner(
     path: &Path,
     new_size_gib: u64,
     runner: &impl QemuImgRunner,
 ) -> Result<()> {
-    let is_block_device = std::fs::metadata(path)
-        .map(|metadata| metadata.file_type().is_block_device())
-        .unwrap_or(false);
-    if path.starts_with("/dev") || is_block_device {
-        bail!("Physical disks cannot be resized by VM Curator");
-    }
+    resize_disk_with_dependencies(path, new_size_gib, runner, |_| Ok(false))
+}
+
+fn resize_disk_with_dependencies(
+    path: &Path,
+    new_size_gib: u64,
+    runner: &impl QemuImgRunner,
+    is_block_device: impl FnOnce(&Path) -> io::Result<bool>,
+) -> Result<()> {
     if new_size_gib == 0 {
         bail!("Disk size must be greater than zero");
+    }
+    if path.starts_with("/dev") {
+        bail!("Physical disks cannot be resized by VM Curator");
+    }
+    if is_block_device(path)
+        .with_context(|| format!("Failed to inspect disk path: {}", path.display()))?
+    {
+        bail!("Physical disks cannot be resized by VM Curator");
     }
 
     let info = disk_image_info_with_runner(path, runner)?;
@@ -197,7 +211,7 @@ fn parse_disk_info_json(stdout: &str) -> Result<DiskImageInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
@@ -321,6 +335,41 @@ mod tests {
     }
 
     #[test]
+    fn resize_rejects_detected_block_devices_without_running_qemu_img() {
+        let runner = FakeQemuImgRunner::default();
+        let probed = Cell::new(false);
+
+        let error =
+            resize_disk_with_dependencies(Path::new("/mapped/example-disk"), 2, &runner, |path| {
+                assert_eq!(path, Path::new("/mapped/example-disk"));
+                probed.set(true);
+                Ok(true)
+            })
+            .unwrap_err();
+
+        assert!(probed.get());
+        assert!(error.to_string().contains("Physical disks"));
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn resize_stops_when_block_device_probe_fails() {
+        let runner = FakeQemuImgRunner::default();
+
+        let error =
+            resize_disk_with_dependencies(Path::new("/mapped/example-disk"), 2, &runner, |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "metadata denied",
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Failed to inspect disk path"));
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
     fn resize_passes_detected_format_and_absolute_size() {
         let runner = FakeQemuImgRunner::with_responses(vec![
             FakeQemuImgRunner::success(r#"{"format":"raw","virtual-size":1073741824}"#),
@@ -396,6 +445,22 @@ mod tests {
 
         assert!(error.to_string().contains("permission denied"));
         assert_eq!(runner.calls.borrow()[1][2], "qcow2");
+    }
+
+    #[test]
+    fn resize_reports_spawn_failure_from_resize_command() {
+        let runner = FakeQemuImgRunner::with_responses(vec![
+            FakeQemuImgRunner::success(r#"{"format":"raw","virtual-size":1073741824}"#),
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cannot execute qemu-img",
+            )),
+        ]);
+
+        let error = resize_disk_with_runner(Path::new("disk.raw"), 2, &runner).unwrap_err();
+
+        assert!(error.to_string().contains("Failed to run qemu-img resize"));
+        assert_eq!(runner.calls.borrow().len(), 2);
     }
 
     #[test]

@@ -97,6 +97,91 @@ fn resize_target_at(vm_id: &str, disk_paths: &[PathBuf], selected: usize) -> Opt
     })
 }
 
+fn resize_size_screen(
+    target: ResizeTarget,
+    inspect: impl FnOnce(&std::path::Path) -> Result<crate::commands::qemu_img::DiskImageInfo>,
+) -> std::result::Result<Screen, String> {
+    let (target, current_size_bytes) = prepare_resize_dialog(target, inspect)?;
+    Ok(Screen::TextInput(TextInputContext::ResizeVmDisk {
+        vm_id: target.vm_id,
+        disk_path: target.disk_path,
+        current_size_bytes,
+    }))
+}
+
+fn begin_resize_workflow(
+    vm: Option<&crate::vm::DiscoveredVm>,
+    is_running: bool,
+    inspect: impl FnOnce(&std::path::Path) -> Result<crate::commands::qemu_img::DiskImageInfo>,
+) -> std::result::Result<Screen, String> {
+    let mut targets = resize_targets(vm, is_running).map_err(str::to_string)?;
+    if targets.len() == 1 {
+        return resize_size_screen(targets.pop().expect("one resize target"), inspect);
+    }
+
+    let vm_id = targets
+        .first()
+        .expect("resize_targets never returns an empty list")
+        .vm_id
+        .clone();
+    let disk_paths = targets.into_iter().map(|target| target.disk_path).collect();
+    Ok(Screen::ResizeDiskPicker {
+        vm_id,
+        disk_paths,
+        selected: 0,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResizePickerOutcome {
+    NoChange,
+    Cancel,
+    Select(usize),
+    OpenSizeDialog(Screen),
+    Error(String),
+}
+
+fn resize_picker_outcome(
+    screen: &Screen,
+    key: KeyCode,
+    is_running: bool,
+    inspect: impl FnOnce(&std::path::Path) -> Result<crate::commands::qemu_img::DiskImageInfo>,
+) -> ResizePickerOutcome {
+    let Screen::ResizeDiskPicker {
+        vm_id,
+        disk_paths,
+        selected,
+    } = screen
+    else {
+        return ResizePickerOutcome::Error("No virtual system disk selected".to_string());
+    };
+
+    match key {
+        KeyCode::Esc => ResizePickerOutcome::Cancel,
+        KeyCode::Char('j') | KeyCode::Down => ResizePickerOutcome::Select(
+            selected
+                .saturating_add(1)
+                .min(disk_paths.len().saturating_sub(1)),
+        ),
+        KeyCode::Char('k') | KeyCode::Up => ResizePickerOutcome::Select(selected.saturating_sub(1)),
+        KeyCode::Enter => {
+            let Some(target) = resize_target_at(vm_id, disk_paths, *selected) else {
+                return ResizePickerOutcome::Error("No virtual system disk selected".to_string());
+            };
+            if is_running {
+                return ResizePickerOutcome::Error(
+                    "Stop the VM before resizing its disk".to_string(),
+                );
+            }
+            match resize_size_screen(target, inspect) {
+                Ok(screen) => ResizePickerOutcome::OpenSizeDialog(screen),
+                Err(message) => ResizePickerOutcome::Error(message),
+            }
+        }
+        _ => ResizePickerOutcome::NoChange,
+    }
+}
+
 fn execute_resize_request(
     target: &ResizeTarget,
     input: &str,
@@ -110,6 +195,25 @@ fn execute_resize_request(
     resize(&target.disk_path, new_size_gib)
         .map_err(|error| format!("Could not resize disk: {error}"))?;
     Ok(new_size_gib)
+}
+
+fn execute_resize_input(
+    context: &TextInputContext,
+    input: &str,
+    is_running: bool,
+    resize: impl FnOnce(&std::path::Path, u64) -> Result<()>,
+) -> Option<std::result::Result<u64, String>> {
+    let TextInputContext::ResizeVmDisk {
+        vm_id, disk_path, ..
+    } = context
+    else {
+        return None;
+    };
+    let target = ResizeTarget {
+        vm_id: vm_id.clone(),
+        disk_path: disk_path.clone(),
+    };
+    Some(execute_resize_request(&target, input, is_running, resize))
 }
 
 fn text_input_contents(context: &TextInputContext, input: &str) -> String {
@@ -987,36 +1091,12 @@ fn handle_management(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.push_screen(Screen::TextInput(TextInputContext::RenameVm));
                         }
                         MenuAction::ResizeStorage => {
-                            match resize_targets(app.selected_vm(), app.selected_vm_pid().is_some())
-                            {
-                                Ok(mut targets) if targets.len() == 1 => {
-                                    let target = targets.pop().expect("one resize target");
-                                    match prepare_resize_dialog(
-                                        target,
-                                        crate::commands::qemu_img::disk_image_info,
-                                    ) {
-                                        Ok((target, current_size_bytes)) => {
-                                            open_resize_size_dialog(
-                                                app,
-                                                target,
-                                                current_size_bytes,
-                                            );
-                                        }
-                                        Err(message) => app.set_status(message),
-                                    }
-                                }
-                                Ok(targets) => {
-                                    let vm_id = targets[0].vm_id.clone();
-                                    let disk_paths = targets
-                                        .into_iter()
-                                        .map(|target| target.disk_path)
-                                        .collect();
-                                    app.push_screen(Screen::ResizeDiskPicker {
-                                        vm_id,
-                                        disk_paths,
-                                        selected: 0,
-                                    });
-                                }
+                            match begin_resize_workflow(
+                                app.selected_vm(),
+                                app.selected_vm_pid().is_some(),
+                                crate::commands::qemu_img::disk_image_info,
+                            ) {
+                                Ok(screen) => open_resize_screen(app, screen),
                                 Err(message) => app.set_status(message),
                             }
                         }
@@ -1039,62 +1119,40 @@ fn handle_management(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn open_resize_size_dialog(app: &mut App, target: ResizeTarget, current_size_bytes: u64) {
-    app.text_input_buffer.clear();
-    app.push_screen(Screen::TextInput(TextInputContext::ResizeVmDisk {
-        vm_id: target.vm_id,
-        disk_path: target.disk_path,
-        current_size_bytes,
-    }));
+fn open_resize_screen(app: &mut App, screen: Screen) {
+    if matches!(
+        screen,
+        Screen::TextInput(TextInputContext::ResizeVmDisk { .. })
+    ) {
+        app.text_input_buffer.clear();
+    }
+    app.push_screen(screen);
 }
 
 fn handle_resize_disk_picker(app: &mut App, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc => app.pop_screen(),
-        KeyCode::Char('j') | KeyCode::Down => {
-            if let Screen::ResizeDiskPicker {
-                disk_paths,
-                selected,
-                ..
-            } = &mut app.screen
-            {
-                if *selected + 1 < disk_paths.len() {
-                    *selected += 1;
-                }
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
+    let vm_id = match &app.screen {
+        Screen::ResizeDiskPicker { vm_id, .. } => Some(vm_id.as_str()),
+        _ => None,
+    };
+    let is_running = vm_id.is_some_and(|vm_id| app.running_vms.contains_key(vm_id));
+    match resize_picker_outcome(
+        &app.screen,
+        key.code,
+        is_running,
+        crate::commands::qemu_img::disk_image_info,
+    ) {
+        ResizePickerOutcome::NoChange => {}
+        ResizePickerOutcome::Cancel => app.pop_screen(),
+        ResizePickerOutcome::Select(new_selected) => {
             if let Screen::ResizeDiskPicker { selected, .. } = &mut app.screen {
-                *selected = selected.saturating_sub(1);
+                *selected = new_selected;
             }
         }
-        KeyCode::Enter => {
-            let target = match &app.screen {
-                Screen::ResizeDiskPicker {
-                    vm_id,
-                    disk_paths,
-                    selected,
-                } => resize_target_at(vm_id, disk_paths, *selected),
-                _ => None,
-            };
-            let Some(target) = target else {
-                app.set_status("No virtual system disk selected");
-                return Ok(());
-            };
-            if app.running_vms.contains_key(&target.vm_id) {
-                app.set_status("Stop the VM before resizing its disk");
-                return Ok(());
-            }
-
-            match prepare_resize_dialog(target, crate::commands::qemu_img::disk_image_info) {
-                Ok((target, current_size_bytes)) => {
-                    app.pop_screen();
-                    open_resize_size_dialog(app, target, current_size_bytes);
-                }
-                Err(message) => app.set_status(message),
-            }
+        ResizePickerOutcome::OpenSizeDialog(screen) => {
+            app.pop_screen();
+            open_resize_screen(app, screen);
         }
-        _ => {}
+        ResizePickerOutcome::Error(message) => app.set_status(message),
     }
     Ok(())
 }
@@ -2710,20 +2768,17 @@ fn handle_text_input(app: &mut App, context: TextInputContext, key: KeyEvent) ->
         KeyCode::Enter => {
             let input = app.text_input_buffer.clone();
 
-            if let TextInputContext::ResizeVmDisk {
-                vm_id, disk_path, ..
-            } = &context
-            {
-                let target = ResizeTarget {
-                    vm_id: vm_id.clone(),
-                    disk_path: disk_path.clone(),
-                };
-                match execute_resize_request(
-                    &target,
-                    &input,
-                    app.running_vms.contains_key(vm_id),
-                    crate::commands::qemu_img::resize_disk,
-                ) {
+            let resize_vm_is_running = match &context {
+                TextInputContext::ResizeVmDisk { vm_id, .. } => app.running_vms.contains_key(vm_id),
+                _ => false,
+            };
+            if let Some(result) = execute_resize_input(
+                &context,
+                &input,
+                resize_vm_is_running,
+                crate::commands::qemu_img::resize_disk,
+            ) {
+                match result {
                     Ok(new_size_gib) => {
                         app.text_input_buffer.clear();
                         app.pop_screen();
@@ -2913,6 +2968,10 @@ mod tests {
         }
     }
 
+    fn unexpected_disk_inspection(_: &std::path::Path) -> Result<DiskImageInfo> {
+        panic!("this workflow outcome must not inspect a disk")
+    }
+
     #[test]
     fn resize_targets_selects_the_only_virtual_system_disk() {
         let vm = vm_with_disks(vec![
@@ -2991,6 +3050,181 @@ mod tests {
             })
         );
         assert_eq!(resize_target_at("test-vm", &disk_paths, 2), None);
+    }
+
+    #[test]
+    fn resize_workflow_returns_the_next_screen_without_real_qemu_img() {
+        let single_disk_vm = vm_with_disks(vec![disk("os.raw", DiskRole::System)]);
+        let screen = begin_resize_workflow(Some(&single_disk_vm), false, |path| {
+            assert_eq!(path, PathBuf::from("os.raw"));
+            Ok(DiskImageInfo {
+                format: "raw".to_string(),
+                virtual_size: 8 * 1024 * 1024 * 1024,
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            screen,
+            Screen::TextInput(TextInputContext::ResizeVmDisk {
+                vm_id: "test-vm".to_string(),
+                disk_path: PathBuf::from("os.raw"),
+                current_size_bytes: 8 * 1024 * 1024 * 1024,
+            })
+        );
+
+        let multiple_disk_vm = vm_with_disks(vec![
+            disk("os.raw", DiskRole::System),
+            disk("data.raw", DiskRole::System),
+        ]);
+        let inspected = Cell::new(false);
+        let screen = begin_resize_workflow(Some(&multiple_disk_vm), false, |_| {
+            inspected.set(true);
+            anyhow::bail!("picker should open before inspection")
+        })
+        .unwrap();
+        assert_eq!(
+            screen,
+            Screen::ResizeDiskPicker {
+                vm_id: "test-vm".to_string(),
+                disk_paths: vec![PathBuf::from("os.raw"), PathBuf::from("data.raw")],
+                selected: 0,
+            }
+        );
+        assert!(!inspected.get());
+    }
+
+    #[test]
+    fn resize_workflow_rejects_running_vm_before_inspection() {
+        let vm = vm_with_disks(vec![disk("os.raw", DiskRole::System)]);
+        let inspected = Cell::new(false);
+
+        let error = begin_resize_workflow(Some(&vm), true, |_| {
+            inspected.set(true);
+            anyhow::bail!("running VM must not be inspected")
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Stop the VM before resizing its disk");
+        assert!(!inspected.get());
+    }
+
+    #[test]
+    fn resize_picker_outcomes_cover_navigation_and_selection() {
+        let picker = Screen::ResizeDiskPicker {
+            vm_id: "test-vm".to_string(),
+            disk_paths: vec![PathBuf::from("os.raw"), PathBuf::from("data.raw")],
+            selected: 0,
+        };
+        assert_eq!(
+            resize_picker_outcome(&picker, KeyCode::Down, false, unexpected_disk_inspection),
+            ResizePickerOutcome::Select(1)
+        );
+        assert_eq!(
+            resize_picker_outcome(&picker, KeyCode::Up, false, unexpected_disk_inspection),
+            ResizePickerOutcome::Select(0)
+        );
+        assert_eq!(
+            resize_picker_outcome(&picker, KeyCode::Esc, false, unexpected_disk_inspection),
+            ResizePickerOutcome::Cancel
+        );
+        assert_eq!(
+            resize_picker_outcome(
+                &picker,
+                KeyCode::Char('x'),
+                false,
+                unexpected_disk_inspection,
+            ),
+            ResizePickerOutcome::NoChange
+        );
+
+        let picker = Screen::ResizeDiskPicker {
+            vm_id: "test-vm".to_string(),
+            disk_paths: vec![PathBuf::from("os.raw"), PathBuf::from("data.raw")],
+            selected: 1,
+        };
+        assert_eq!(
+            resize_picker_outcome(&picker, KeyCode::Down, false, unexpected_disk_inspection),
+            ResizePickerOutcome::Select(1)
+        );
+        assert_eq!(
+            resize_picker_outcome(&picker, KeyCode::Enter, false, |path| {
+                assert_eq!(path, PathBuf::from("data.raw"));
+                Ok(DiskImageInfo {
+                    format: "raw".to_string(),
+                    virtual_size: 12 * 1024 * 1024 * 1024,
+                })
+            }),
+            ResizePickerOutcome::OpenSizeDialog(Screen::TextInput(
+                TextInputContext::ResizeVmDisk {
+                    vm_id: "test-vm".to_string(),
+                    disk_path: PathBuf::from("data.raw"),
+                    current_size_bytes: 12 * 1024 * 1024 * 1024,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn resize_picker_rechecks_running_state_before_inspection() {
+        let picker = Screen::ResizeDiskPicker {
+            vm_id: "test-vm".to_string(),
+            disk_paths: vec![PathBuf::from("os.raw")],
+            selected: 0,
+        };
+        let inspected = Cell::new(false);
+
+        let outcome = resize_picker_outcome(&picker, KeyCode::Enter, true, |_| {
+            inspected.set(true);
+            anyhow::bail!("running VM must not be inspected")
+        });
+
+        assert_eq!(
+            outcome,
+            ResizePickerOutcome::Error("Stop the VM before resizing its disk".to_string())
+        );
+        assert!(!inspected.get());
+    }
+
+    #[test]
+    fn resize_picker_reports_stale_selection_without_inspection() {
+        let picker = Screen::ResizeDiskPicker {
+            vm_id: "test-vm".to_string(),
+            disk_paths: vec![PathBuf::from("os.raw")],
+            selected: 1,
+        };
+        let inspected = Cell::new(false);
+
+        let outcome = resize_picker_outcome(&picker, KeyCode::Enter, false, |_| {
+            inspected.set(true);
+            anyhow::bail!("stale selection must not be inspected")
+        });
+
+        assert_eq!(
+            outcome,
+            ResizePickerOutcome::Error("No virtual system disk selected".to_string())
+        );
+        assert!(!inspected.get());
+    }
+
+    #[test]
+    fn resize_picker_preserves_inspection_errors() {
+        let picker = Screen::ResizeDiskPicker {
+            vm_id: "test-vm".to_string(),
+            disk_paths: vec![PathBuf::from("os.raw")],
+            selected: 0,
+        };
+
+        let outcome = resize_picker_outcome(&picker, KeyCode::Enter, false, |path| {
+            assert_eq!(path, PathBuf::from("os.raw"));
+            anyhow::bail!("unreadable image")
+        });
+
+        assert_eq!(
+            outcome,
+            ResizePickerOutcome::Error(
+                "Could not inspect selected disk: unreadable image".to_string()
+            )
+        );
     }
 
     #[test]
@@ -3130,5 +3364,31 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "Could not resize disk: permission denied");
+    }
+
+    #[test]
+    fn resize_input_routes_the_context_target_to_the_resize_operation() {
+        let context = TextInputContext::ResizeVmDisk {
+            vm_id: "test-vm".to_string(),
+            disk_path: PathBuf::from("data.raw"),
+            current_size_bytes: 8 * 1024 * 1024 * 1024,
+        };
+        let called = Cell::new(false);
+
+        let result = execute_resize_input(&context, "16", false, |path, size| {
+            assert_eq!(path, PathBuf::from("data.raw"));
+            assert_eq!(size, 16);
+            called.set(true);
+            Ok(())
+        });
+
+        assert_eq!(result, Some(Ok(16)));
+        assert!(called.get());
+        assert_eq!(
+            execute_resize_input(&TextInputContext::RenameVm, "16", false, |_, _| {
+                panic!("non-resize input must not invoke the resize operation")
+            }),
+            None
+        );
     }
 }
